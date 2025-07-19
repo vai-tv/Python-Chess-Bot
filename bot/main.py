@@ -273,7 +273,7 @@ class Computer:
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
 
-        if depth == 0 or board.is_game_over():
+        if depth == 0 or board.is_game_over() or self.is_timeup():
             return self.evaluate(board)
 
         is_maximizing = board.turn == chess.WHITE
@@ -289,7 +289,7 @@ class Computer:
 
         for move in legals:
             board.push(move)
-            score = self.minimax(board, depth - 1, alpha, beta, heuristic_sort=heuristic_sort)
+            score = self.minimax(board, depth - 1, alpha, beta, heuristic_sort=heuristic_sort, heuristic_eliminate=heuristic_eliminate)
             board.pop()
 
             if is_maximizing:
@@ -352,11 +352,31 @@ class Computer:
             for square in set(attacked_squares):
                 attack_bonus += attacked_squares.count(square) ** 0.8
 
+                # Reward centre control
+                if square in [chess.E4, chess.E5, chess.D4, chess.D5]:
+                    attack_bonus += 2.5
+
                 # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                 target = board.piece_at(square)
                 if target is None:
                     continue
                 attack_bonus += self.MATERIAL[target.piece_type] ** 1.5 * 0.5
+            
+            # Reward pieces per square control
+            control_bonus = 0
+
+            for square in board.piece_map().keys():
+                attacks = board.attacks(square)
+                control_bonus += len(attacks) ** 0.5
+
+                if square not in [chess.E4, chess.E5, chess.D4, chess.D5]:
+                    continue
+                piece = board.piece_at(square)
+                if piece is None or piece.color != color:
+                    continue
+                control_bonus += self.MATERIAL[piece.piece_type]
+                if piece == chess.PAWN:
+                    control_bonus += 2
 
             # Material
             material_score = material[color]
@@ -375,7 +395,7 @@ class Computer:
                 # Heatmaps are incorrectly oriented for python chess; flip them
                 if piece.color == chess.WHITE:
                     rank = 7 - rank
-                heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file] * (self.MATERIAL[piece.piece_type] ** 0.5)
+                heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file]# * (self.MATERIAL[piece.piece_type] ** 0.5)
             
             # Punish low number of legal moves
             if color == board.turn:
@@ -386,10 +406,11 @@ class Computer:
                 legal_moves = board.legal_moves
                 board.turn = old_turn
             
-            score -= (10 / len(list(legal_moves))) ** 2 * (aggression[not color] ** 2)
-            score += (material_score ** 1.5 * 10) * aggression[color]
+            score -= (5 / len(list(legal_moves))) ** 1.5 * (aggression[not color] ** 2)
+            score += (material_score ** 2 * 10) * aggression[color]
             score += (attack_bonus ** 1.5 * 0.1) * aggression[color]
-            score += (heatmap_score * 10)
+            score += (heatmap_score * 15)
+            score += (control_bonus ** 1.5) * 0.25
 
             # print(25 / len(list(legal_moves)),"lmp")
             # print(material_score,"ms")
@@ -469,6 +490,7 @@ class Computer:
 
         depth = 1
         best_move = None
+        save = True
 
         moves = list(board.legal_moves)  # Convert generator to list for membership checks
 
@@ -511,9 +533,9 @@ class Computer:
                         board.pop()
                         move_score_map.append((move, score))
                         continue
-                    score = self.minimax(board, depth, float('-inf'), float('inf'))
+                    score = self.minimax(board, depth, float('-inf'), float('inf'), heuristic_eliminate=False)
 
-                # print(f"{move}: {score}")
+                print(f"{move} : {score:.2f}",end='\t',flush=True)
                 board.pop()
                 
                 move_score_map.append((move, score))
@@ -525,7 +547,10 @@ class Computer:
                     break
                 if self.is_timeup():
                     print("TIMEUP")
+                    save = False
                     break
+            
+            print()
             
             # Terminate early if an immediate win is found
             if _should_terminate(move_score_map) or all(score == self.WORST_SCORE for _, score in move_score_map):
@@ -536,7 +561,6 @@ class Computer:
 
                 # Save the winning move and the position before the move
                 save_winning_move(board, best_move)
-
                 break
 
             if board.turn == chess.WHITE:
@@ -548,7 +572,8 @@ class Computer:
 
             depth += 1
 
-            self.conn.commit()
+            if save:
+                self.conn.commit()
 
         # self.conn.close()  # Removed to prevent closing connection prematurely
 
@@ -585,7 +610,7 @@ def main():
     while not board.is_game_over():
         print(board,"\n\n")
         player = players[0] if board.turn == chess.WHITE else players[1]
-        move = player.best_move(board, timeout=15)
+        move = player.best_move(board, timeout=30)
         if move is None:
             break
         board.push(move)
