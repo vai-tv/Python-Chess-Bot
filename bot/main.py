@@ -1,8 +1,8 @@
 import chess
 import json
+import sqlite3
 import time
 
-from typing import Literal
 
 class Computer:
 
@@ -26,11 +26,105 @@ class Computer:
         self.WORST_SCORE = float('-inf') if color == chess.WHITE else float('inf')
         self.MAXMIN = max if color == chess.WHITE else min
 
+        self.timeout: float | None = None
+        self.start_time: float | None = None
+
+        self.init_db()
+
+    ##################################################
+    #                    DATABASES                   #
+    ##################################################
+
+    TRANSPOSITION_PATH = "bot/transposition_table.db"
+
+    @classmethod
+    def init_db(cls):
+        """
+        Initialize SQLite database for transposition table stored in file.
+
+        Connects to the SQLite database, creates the table if it does not exist, and
+        commits the changes.
+        """
+        
+        # Initialize SQLite database for transposition table stored in file
+        cls.conn = sqlite3.connect(cls.TRANSPOSITION_PATH)
+        cls.cursor = cls.conn.cursor()
+        cls.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS transposition_table (
+                zobrist_key TEXT PRIMARY KEY,
+                score REAL,
+                depth INTEGER
+            )
+        """)
+        cls.conn.commit()
+
+    def evaluate_from_db(self, board: chess.Board, depth: int = 0) -> float | None:
+        """
+        Evaluate the given board position from the transposition table in the database.
+
+        Args:
+            board: The chess board to evaluate.
+            depth: The minimum depth to consider in the database.
+
+        Returns:
+            The score of the board position if it exists in the database, otherwise None.
+        """
+        
+        # TODO: Implement zobrist
+        zobrist_key = board.fen()
+        self.cursor.execute("SELECT score FROM transposition_table WHERE zobrist_key = ? AND depth >= ?", (zobrist_key, depth,))
+        row = self.cursor.fetchone()
+        if row is not None:
+            return row[0]
+        return None
+
+    def save_evaluation(self, board: chess.Board, score: float, depth: int) -> None:
+        """
+        Save an evaluation of a given board position to the transposition table in the database.
+
+        Args:
+            board: The chess board to evaluate.
+            score: The score of the board position.
+            depth: The depth at which the score was evaluated.
+
+        Raises:
+            sqlite3.Error: If there is an error saving the evaluation to the database.
+        """
+        
+        # TODO: Implement zobrist
+        zobrist_key = board.fen()
+        try:
+            # Check existing depth for the zobrist_key
+            self.cursor.execute("SELECT depth FROM transposition_table WHERE zobrist_key = ?", (zobrist_key,))
+            row = self.cursor.fetchone()
+            if row is None:
+                # No existing entry, insert new
+                self.cursor.execute("INSERT INTO transposition_table (zobrist_key, score, depth) VALUES (?, ?, ?)", (zobrist_key, score, depth,))
+                # self.conn.commit()
+            else:
+                existing_depth = row[0]
+                if depth > existing_depth:
+                    # Update only if new depth is higher
+                    self.cursor.execute("UPDATE transposition_table SET score = ?, depth = ? WHERE zobrist_key = ?", (score, depth, zobrist_key))
+                    # self.conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error saving evaluation to DB: {e}")
+
     ##################################################
     #                   HEURISTICS                   #
     ##################################################
 
     def _score_weak_heuristic(self, board: chess.Board) -> list[tuple[chess.Move, float]]:
+        """
+        Evaluate and score each legal move from the current board position using the Minimax algorithm 
+        without heuristic sorting or elimination.
+
+        :param board: The current state of the chess board.
+        :type board: chess.Board
+        :return: A list of tuples containing legal moves and their corresponding scores.
+        :rtype: list[tuple[chess.Move, float]]
+        """
+
         weak_depth = 0
         move_score_map: list[tuple[chess.Move, float]] = []
 
@@ -59,6 +153,21 @@ class Computer:
         return [move for move, _ in sorted_moves]
     
     def _turning_point(self, scores: list[float]) -> int:
+        """
+        Find the index of the 'turning point' in sorted scores using the elbow method.
+
+        The elbow method is a technique to find the cutoff point in a sorted list of numbers.
+        It works by finding the point with the maximum distance to a line going through the
+        first and last point of the list.
+
+        The method takes a sorted list of scores as input and returns the index of the
+        turning point. If the list is empty or contains only one element, the method
+        returns -1 or 0 respectively.
+
+        :param scores: A sorted list of scores
+        :return: The index of the turning point
+        """
+
         # Elbow method to find cutoff index in sorted scores
         if not scores:
             return -1
@@ -183,7 +292,12 @@ class Computer:
         :rtype: float
         """
 
-        # Game-over
+        # Try to get score from DB
+        cached_score = self.evaluate_from_db(board)
+        if cached_score is not None:
+            return cached_score
+
+        # Game over
         if board.is_game_over():
             if board.result() == "1-0":
                 return float('inf')
@@ -196,6 +310,28 @@ class Computer:
         def evaluate_player(color: chess.Color) -> float:
             score = 0
 
+            attack_bonus = 0
+
+            # Reward squares covered
+            attacked_squares: list[chess.Square] = []
+            for square, piece in board.piece_map().items():
+                if piece.color == color:
+                    attacked_squares.extend(list(board.attacks(square)))
+            
+            for square in set(attacked_squares):
+                attack_bonus += attacked_squares.count(square) ** 0.8
+
+                # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
+                target = board.piece_at(square)
+                if target is None:
+                    continue
+                if target.color == color:
+                    attack_bonus += self.MATERIAL[target.piece_type] ** 1.5 * 0.5
+                else:
+                    attack_bonus += self.MATERIAL[target.piece_type] * 0.75 * 0.5
+
+            score += attack_bonus ** 1.5 * 0.05
+
             return score
         
         stage = self.get_game_stage(board)
@@ -205,6 +341,7 @@ class Computer:
         for square, piece in board.piece_map().items():
             score += self.MATERIAL[piece.piece_type] * (1 if piece.color == chess.WHITE else -1) ** 2 * 10
         
+        # Heatmap
         for square, piece in board.piece_map().items():
             piece_symbol = piece.symbol().upper()
 
@@ -217,8 +354,13 @@ class Computer:
                 rank = 7 - rank
             score += self.HEATMAP[stage][piece_symbol][rank][file] * (1 if piece.color == chess.WHITE else -1)
 
+        # Player evaluation
         score += evaluate_player(chess.WHITE)
         score -= evaluate_player(chess.BLACK)
+
+        # Save evaluation to DB
+        self.save_evaluation(board, score, 0)
+
         return score
 
     def best_move(self, board: chess.Board, timeout: float=float('inf')) -> chess.Move | None:
@@ -235,34 +377,60 @@ class Computer:
         """
 
         def _should_terminate(move_score_map: list[tuple[chess.Move, float]]) -> bool:
-            return any(score == self.BEST_SCORE for _, score in move_score_map) or time.time() - start_time > timeout
+            return any(score == self.BEST_SCORE for _, score in move_score_map) or self.is_timeup()
 
-        start_time = time.time()
+        self.start_time = time.time()
+        self.timeout = timeout
 
         depth = 1
         best_move = None
 
-        legals = board.legal_moves
+        moves = list(board.legal_moves)  # Convert generator to list for membership checks
 
-        while time.time() - start_time < timeout:
+        move_score_map: list[tuple[chess.Move, float]] = [] # js so pylance shuts up about it being unbound :sob:
 
-            print(f"Depth: {depth}")
+        while not self.is_timeup():
 
-            move_score_map: list[tuple[chess.Move, float]] = []
+            print(f"""
+            DEPTH {depth}
+
+            """)
 
             # Gradually filter out based on the previous scores
             if depth > 1:
-                turning_point = self._turning_point([score for _, score in move_score_map])
-                print(turning_point)
-                legals = [move for move, _ in move_score_map[:turning_point]]
-                print(len(legals),"left")
 
-            for move in legals:
+                move_score_map.sort(key=lambda x: x[1], reverse=board.turn == chess.WHITE)
+
+                turning_point = self._turning_point([score for _, score in move_score_map])
+                moves = [move for move, _ in move_score_map[:turning_point]]
+                print(len(moves),"left")
+
+            moves_set = set(moves)  # Use a set for efficient membership checking
+
+            move_score_map: list[tuple[chess.Move, float]] = []
+
+            for move in moves:
                 board.push(move)
-                score = self.minimax(board, depth, float('-inf'), float('inf'))
+
+                # vv CURRENTLY UNREACHABLE vv
+                if move not in moves_set:
+                    score = self.evaluate_from_db(board, depth)
+                    if score is None:
+                        board.pop()
+                        continue
+                else:
+                    score = self.minimax(board, depth, float('-inf'), float('inf'))
+                # ^^ CURRENTLY UNREACHABLE ^^
+
+                print(f"{move}: {score}")
                 board.pop()
                 
                 move_score_map.append((move, score))
+
+                self.save_evaluation(board, score, depth)
+
+                if _should_terminate(move_score_map):
+                    break
             
             # Terminate early if an immediate win is found
             if _should_terminate(move_score_map):
@@ -281,6 +449,8 @@ class Computer:
 
             depth += 1
 
+            self.conn.commit()
+
         return best_move
 
     ##################################################
@@ -298,19 +468,25 @@ class Computer:
         else:
             return "late"
 
+    def is_timeup(self) -> bool:
+        if self.timeout is None or self.start_time is None:
+            return False
+        return time.time() - self.start_time > self.timeout
+
 def main():
 
     FEN = "r3qrk1/2bn1ppp/p1p5/1p6/3P4/P1NB2QR/1PP2PPP/R5K1 w - - 0 1"
+    FEN = chess.STARTING_BOARD_FEN
 
     board = chess.Board(FEN)
     computer = Computer(chess.WHITE)
 
     while not board.is_game_over():
-        move = computer.best_move(board)
+        move = computer.best_move(board, timeout=10)
         if move is None:
             break
         board.push(move)
-        print(move)
+        print("Move:", move)
         print(board,"\n\n")
 
 if __name__ == "__main__":
