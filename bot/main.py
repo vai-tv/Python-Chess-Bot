@@ -337,11 +337,8 @@ class Computer:
                 return 0
         
         stage = self.get_game_stage(board)
-        score = 0
 
         def evaluate_player(color: chess.Color) -> float:
-            score = 0
-
             # Reward squares covered
             attack_bonus = 0
             attacked_squares: list[chess.Square] = []
@@ -354,20 +351,24 @@ class Computer:
 
                 # Reward centre control
                 if square in [chess.E4, chess.E5, chess.D4, chess.D5]:
-                    attack_bonus += 2.5
+                    attack_bonus += 2.5 * aggression[color]
+                # Reward control of enemy half
+                if color == chess.WHITE and chess.square_rank(square) > 3:
+                    attack_bonus += 1.5 * aggression[color]
+                elif color == chess.BLACK and chess.square_rank(square) < 4:
+                    attack_bonus += 1.5 * aggression[color]
 
                 # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                 target = board.piece_at(square)
                 if target is None:
                     continue
-                attack_bonus += self.MATERIAL[target.piece_type] ** 1.5 * 0.5
+                attack_bonus += self.MATERIAL[target.piece_type] ** 1.5
             
             # Reward pieces per square control
             control_bonus = 0
-
             for square in board.piece_map().keys():
                 attacks = board.attacks(square)
-                control_bonus += len(attacks) ** 0.5
+                control_bonus += len(attacks) ** 0.75
 
                 if square not in [chess.E4, chess.E5, chess.D4, chess.D5]:
                     continue
@@ -405,17 +406,62 @@ class Computer:
                 board.turn = color
                 legal_moves = board.legal_moves
                 board.turn = old_turn
+
+            # Bonus for minor piece development
+            minor_piece_development_bonus = 0
+            starting_squares = {
+                chess.WHITE: {
+                    chess.KNIGHT: [chess.B1, chess.G1],
+                    chess.BISHOP: [chess.C1, chess.F1]
+                },
+                chess.BLACK: {
+                    chess.KNIGHT: [chess.B8, chess.G8],
+                    chess.BISHOP: [chess.C8, chess.F8]
+                }
+            }
+            for square, piece in board.piece_map().items():
+                if piece.color == color and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
+                    if square not in starting_squares[color][piece.piece_type]:
+                        minor_piece_development_bonus += 1.5  # Bonus for developed minor piece
+
+
+            # Might be removed later : Penalty for early queen activity
+            queen_penalty = 0
+            queen_squares = [square for square, piece in board.piece_map().items() if piece.color == color and piece.piece_type == chess.QUEEN]
+            for q_square in queen_squares:
+                rank = chess.square_rank(q_square)
+                if stage == 'early':
+                    # Penalize queen on ranks 3,4,5 (too early and too advanced)
+                    if (color == chess.WHITE and rank <= 4) or (color == chess.BLACK and rank >= 3):
+                        queen_penalty += 2.0
+                elif stage == 'middle':
+                    # Smaller penalty in middle game for queen too advanced
+                    if (color == chess.WHITE and rank <= 3) or (color == chess.BLACK and rank >= 4):
+                        queen_penalty += 1.0
             
+            # King safety penalties
+            king_penalty = 0
+            # Since python-chess does not have has_castled method, check castling rights and castling status differently
+            # We can check if the castling rights are lost but the king is still on the original square, meaning no castling yet
+            king_start_square = chess.E1 if color == chess.WHITE else chess.E8
+            king = board.king(color)
+            has_moved = king != king_start_square
+            if stage != 'late' and (not board.has_castling_rights(color)) and has_moved:
+                king_penalty += 10.0
+            if king is None:
+                return float('-inf') if color == chess.WHITE else float('inf')
+            king_moves = list(board.attacks(king))
+            king_penalty -= len(king_moves) ** 0.5 # Penalise less for more king moves
+
+            score = 0            
+            score -= king_penalty * 2
+            score -= queen_penalty / aggression[color]
             score -= (5 / len(list(legal_moves))) ** 1.5 * (aggression[not color] ** 2)
             score += (material_score ** 2 * 10) * aggression[color]
             score += (attack_bonus ** 1.5 * 0.1) * aggression[color]
             score += (heatmap_score * 15)
-            score += (control_bonus ** 1.5) * 0.25
-
-            # print(25 / len(list(legal_moves)),"lmp")
-            # print(material_score,"ms")
-            # print(attack_bonus,"ab")
-            # print(heatmap_score,"hms")
+            score += (control_bonus ** 1.5) * 0.35 * aggression[color]
+            score += minor_piece_development_bonus * aggression[color]
 
             return score
         
@@ -434,6 +480,7 @@ class Computer:
             aggression[color] *= 0.5 if stage == 'early' else 1.25 if stage == 'middle' else 1
         
         # Player evaluation
+        score = 0
         score += evaluate_player(chess.WHITE)
         score -= evaluate_player(chess.BLACK)
 
@@ -478,6 +525,8 @@ class Computer:
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
 
+        print(f"{"white" if board.turn == chess.WHITE else "black"} move")
+
         self.start_time = time.time()
         self.timeout = timeout
 
@@ -492,21 +541,27 @@ class Computer:
         best_move = None
         save = True
 
+        maxmin = max if board.turn == chess.WHITE else min
+
         moves = list(board.legal_moves)  # Convert generator to list for membership checks
 
-        move_score_map: list[tuple[chess.Move, float]] = [] # js so pylance shuts up about it being unbound LOLOLOL
+        move_score_map: list[tuple[chess.Move, float]] = [(move, 0) for move in moves] # Initialize once before loop
+
+        # Keep track of best moves and scores from last few fully completed depths
+        best_moves_history: list[list[tuple[chess.Move, float]]] = []
 
         while not self.is_timeup():
 
             print(f"""DEPTH {depth}: """,end='\t')
 
+            move_score_map.sort(key=lambda x: x[1], reverse=board.turn == chess.WHITE)
+            moves = [move for move, _ in move_score_map]
+
             # Gradually filter out based on the previous scores
-            if depth > 3 and move_score_map:
-
-                move_score_map.sort(key=lambda x: x[1], reverse=board.turn == chess.WHITE)
-
+            if depth > 3:
                 turning_point = self._turning_point([score for _, score in move_score_map])
-                moves = [move for move, _ in move_score_map[:turning_point]]
+                move_score_map = move_score_map[:turning_point]
+                moves = moves[:turning_point]
                 print(len(moves),"moves to look at:",[str(m) for m in moves])
 
             # If only one move left, return it
@@ -515,7 +570,8 @@ class Computer:
 
             moves_set = set(moves)  # Use a set for efficient membership checking
 
-            move_score_map: list[tuple[chess.Move, float]] = []
+            # Create a dictionary for quick lookup and update of scores
+            move_score_dict = dict(move_score_map)
 
             for move in moves:
                 board.push(move)
@@ -531,18 +587,18 @@ class Computer:
                     score = self.evaluate_from_db(board, depth)
                     if score is not None:
                         board.pop()
-                        move_score_map.append((move, score))
+                        move_score_dict[move] = score
                         continue
                     score = self.minimax(board, depth, float('-inf'), float('inf'), heuristic_eliminate=False)
 
                 print(f"{move} : {score:.2f}",end='\t',flush=True)
                 board.pop()
                 
-                move_score_map.append((move, score))
+                move_score_dict[move] = score
 
                 self.save_evaluation(board, score, depth)
 
-                if _should_terminate(move_score_map):
+                if _should_terminate(list(move_score_dict.items())):
                     print("TERMINATED EARLY")
                     break
                 if self.is_timeup():
@@ -551,22 +607,54 @@ class Computer:
                     break
             
             print()
-            
+
+            # Update move_score_map from the dictionary for next iteration
+            move_score_map = list(move_score_dict.items())
+
+            # Save the current depth's move scores to history if search completed fully
+            if not self.is_timeup() and not _should_terminate(move_score_map):
+                best_moves_history.append(move_score_map)
+                # Keep only the last 3 depths
+                if len(best_moves_history) > 3:
+                    best_moves_history.pop(0)
+
             # Terminate early if an immediate win is found
             if _should_terminate(move_score_map) or all(score == self.WORST_SCORE for _, score in move_score_map):
-                if board.turn == chess.WHITE:
-                    best_move = max(move_score_map, key=lambda x: x[1])[0]
-                else:
-                    best_move = min(move_score_map, key=lambda x: x[1])[0]
+                # Choose best move from current depth
+                best_move = maxmin(move_score_map, key=lambda x: x[1])[0]
 
                 # Save the winning move and the position before the move
                 save_winning_move(board, best_move)
                 break
 
-            if board.turn == chess.WHITE:
-                best_move = max(move_score_map, key=lambda x: x[1])[0]
+            # Choose best move from the last fully completed depths history
+            if best_moves_history:
+                # Aggregate scores for moves appearing in history
+                aggregate_scores = {}
+                for depth_scores in best_moves_history:
+                    for move, score in depth_scores:
+                        aggregate_scores[move] = aggregate_scores.get(move, 0) + score
+                # Average scores
+                for move in aggregate_scores:
+                    aggregate_scores[move] /= len(best_moves_history)
+
+                # If timeout occurred, compare current depth scores with previous depth scores
+                if self.is_timeup() and len(best_moves_history) > 1:
+                    print("Timeout occurred, comparing with previous depth scores")
+                    prev_scores = {move: score for move, score in best_moves_history[-2]}
+                    # Check if all current moves are worse than previous best move
+                    current_best_score = max(aggregate_scores.values()) if board.turn == chess.WHITE else min(aggregate_scores.values())
+                    prev_best_score = max(prev_scores.values()) if board.turn == chess.WHITE else min(prev_scores.values())
+                    if (board.turn == chess.WHITE and current_best_score < prev_best_score) or (board.turn == chess.BLACK and current_best_score > prev_best_score):
+                        # Revert to previous depth's best move
+                        best_move = maxmin(prev_scores.items(), key=lambda x: x[1])[0]
+                    else:
+                        best_move = maxmin(aggregate_scores.items(), key=lambda x: x[1])[0]
+                else:
+                    best_move = maxmin(aggregate_scores.items(), key=lambda x: x[1])[0]
             else:
-                best_move = min(move_score_map, key=lambda x: x[1])[0]
+                # Fallback to current depth best move
+                best_move = maxmin(move_score_map, key=lambda x: x[1])[0]
 
             print(best_move)
 
@@ -610,7 +698,7 @@ def main():
     while not board.is_game_over():
         print(board,"\n\n")
         player = players[0] if board.turn == chess.WHITE else players[1]
-        move = player.best_move(board, timeout=30)
+        move = player.best_move(board, timeout=20)
         if move is None:
             break
         board.push(move)
