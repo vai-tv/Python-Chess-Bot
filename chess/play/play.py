@@ -1,5 +1,6 @@
 import argparse
 import chess
+import chess.pgn
 import os
 import sys
 
@@ -7,6 +8,7 @@ from datetime import datetime
 
 sys.path.insert(0, 'chess')  # Adjust path to import other_bots module
 import other_bots
+from bot import main as main_bot
 
 ####################################################################################################
 #                                             GLOBALS                                              #
@@ -52,32 +54,43 @@ def header():
  -------------------------------------------------
 """
 
-def footer(winner: str):
+def footer(board: chess.Board, winner: str):
+    # Create a PGN game from the board's move stack
+    game = chess.pgn.Game()
+    node = game
+    for move in board.move_stack:
+        node = node.add_variation(move)
+    pgn_string = str(game)
+
     return f"""
  ----------- {args.players[0].upper().ljust(10)} VS {args.players[1].upper().rjust(10)} ------------
 | TIME : {(str(args.timeout) + ' SECONDS PER MOVE').rjust(40)} |
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
 | WINNER : {winner.upper().rjust(38)} |
  -------------------------------------------------
+
+{pgn_string}
 """
 
-MOVELOG_PATH = f"chess/play/logs/{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{args.players[0].upper()}_{args.players[1].upper()}.txt"
-
-os.makedirs(os.path.dirname(MOVELOG_PATH), exist_ok=True)
-MOVELOG_FILE = open(MOVELOG_PATH, 'w')
-
-print(f"Game log will be saved to: {MOVELOG_PATH}")
-
-def print_and_log(*args, **kwargs):
-    """Prints to console and logs to file."""
-    print(*args, **kwargs)
-    print(*args, file=MOVELOG_FILE, **kwargs)
+SESSION = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 
 ####################################################################################################
 #                                             MAIN LOOP                                            #
 ####################################################################################################
 
 def main():
+
+    MOVELOG_PATH = f"chess/play/logs/SESSION_{SESSION}/{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{args.players[0].upper()}_{args.players[1].upper()}.log"
+
+    os.makedirs(os.path.dirname(MOVELOG_PATH), exist_ok=True)
+    MOVELOG_FILE = open(MOVELOG_PATH, 'w')
+
+    print(f"Game log will be saved to: {MOVELOG_PATH}")
+
+    def print_and_log(*args, **kwargs):
+        """Prints to console and logs to file."""
+        print(*args, **kwargs)
+        print(*args, file=MOVELOG_FILE, **kwargs)
 
     board = chess.Board()
 
@@ -87,19 +100,37 @@ def main():
 
         for player in players:
 
-            move = player(board.turn).best_move(board, timeout=10)
-            if move is None:
-                print("No move found, exiting.")
-                return
-            
-            print_and_log(f"{board.fullmove_number}: {board.san(move)}")
-            board.push(move)
             print(board, file=MOVELOG_FILE)
             print(board, "\n\n")
 
+            if board.is_game_over():
+                break
+
+            move = player(board.turn).best_move(board, timeout=10)
+            if move is None:
+                return
+            
+            if board.turn == chess.WHITE:
+                print_and_log(f"\n{board.fullmove_number}: {board.san(move)}")
+            else:
+                print_and_log(f"... {board.san(move)}")
+
+            board.push(move)
+
+    print(board, file=MOVELOG_FILE)
+    print(board, "\n\n")
+
     winner = "White" if board.result() == "1-0" else "Black" if board.result() == "0-1" else "Draw"
 
-    print_and_log(footer(winner))
+    print_and_log(footer(board, winner))
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print("\nGame interrupted by user.")
+            break
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            print("Restarting the game...")

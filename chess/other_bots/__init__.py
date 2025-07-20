@@ -3,6 +3,8 @@ import pkgutil
 import inspect
 import sys
 
+from bot import main
+
 __all__ = []
 
 # Get the __path__ attribute of the current package
@@ -23,3 +25,5 @@ for loader, module_name, is_pkg in pkgutil.iter_modules(package_path):
         if obj.__module__ == module.__name__:
             globals()[name] = obj
             computer_classes.append(obj)
+
+__all__.append(main) # type: ignore

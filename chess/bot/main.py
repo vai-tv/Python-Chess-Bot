@@ -19,7 +19,7 @@ class Computer:
         chess.KING: 25
     }
 
-    HEATMAP_PATH = "global-assets/heatmap.json"
+    HEATMAP_PATH = "chess/global-assets/heatmap.json"
     HEATMAP = json.load(open(HEATMAP_PATH))
 
     def __init__(self, color: chess.Color):
@@ -37,7 +37,7 @@ class Computer:
     #                    DATABASES                   #
     ##################################################
 
-    TRANSPOSITION_PATH = f"tables/{__version__}_transposition.db"
+    TRANSPOSITION_PATH = f"chess/tables/{__version__}_transposition.db"
 
     @classmethod
     def init_db(cls):
@@ -665,7 +665,7 @@ class Computer:
             if save:
                 self.conn.commit()
 
-        # self.conn.close()  # Removed to prevent closing connection prematurely
+        self.conn.close()
 
         return best_move
 
