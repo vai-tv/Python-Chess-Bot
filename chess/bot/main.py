@@ -1,8 +1,10 @@
 import chess
 import json
+import os
 import sqlite3
 import time
 
+__version__ = '1.1.2'
 
 class Computer:
 
@@ -17,7 +19,7 @@ class Computer:
         chess.KING: 25
     }
 
-    HEATMAP_PATH = "bot/heatmap.json"
+    HEATMAP_PATH = "global-assets/heatmap.json"
     HEATMAP = json.load(open(HEATMAP_PATH))
 
     def __init__(self, color: chess.Color):
@@ -35,7 +37,7 @@ class Computer:
     #                    DATABASES                   #
     ##################################################
 
-    TRANSPOSITION_PATH = "bot/transposition_table.db"
+    TRANSPOSITION_PATH = f"tables/{__version__}_transposition.db"
 
     @classmethod
     def init_db(cls):
@@ -562,7 +564,7 @@ class Computer:
                 turning_point = self._turning_point([score for _, score in move_score_map])
                 move_score_map = move_score_map[:turning_point]
                 moves = moves[:turning_point]
-                print(len(moves),"moves to look at:",[str(m) for m in moves])
+                print(len(moves),"moves to look at:",[board.san(m) for m in moves])
 
             # If only one move left, return it
             if len(moves) == 1:
@@ -591,8 +593,8 @@ class Computer:
                         continue
                     score = self.minimax(board, depth, float('-inf'), float('inf'), heuristic_eliminate=False)
 
-                print(f"{move} : {score:.2f}",end='\t',flush=True)
                 board.pop()
+                print(f"{board.san(move)} : {score:.2f}",end='\t',flush=True)
                 
                 move_score_dict[move] = score
 
@@ -656,7 +658,7 @@ class Computer:
                 # Fallback to current depth best move
                 best_move = maxmin(move_score_map, key=lambda x: x[1])[0]
 
-            print(best_move)
+            print("BEST:",board.san(best_move))
 
             depth += 1
 
