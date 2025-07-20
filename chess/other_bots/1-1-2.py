@@ -4,9 +4,11 @@ import os
 import sqlite3
 import time
 
-__version__ = '1.1.3'
+__version__ = '1.1.2'
 
 class Computer:
+
+    p = chess.Piece.from_symbol('P')
 
     MATERIAL: dict[int, int] = {
         chess.PAWN: 1,
@@ -160,39 +162,63 @@ class Computer:
     
     def _turning_point(self, scores: list[float]) -> int:
         """
-        Find the index of the 'turning point' in sorted scores by identifying the biggest gap.
+        Find the index of the 'turning point' in sorted scores using the elbow method.
 
-        The method takes a sorted list of scores as input and returns the index after the biggest gap.
-        If the biggest gap is smaller than a threshold fraction of the score range, it returns len(scores) to keep all moves.
+        The elbow method is a technique to find the cutoff point in a sorted list of numbers.
+        It works by finding the point with the maximum distance to a line going through the
+        first and last point of the list.
+
+        The method takes a sorted list of scores as input and returns the index of the
+        turning point. If the list is empty or contains only one element, the method
+        returns -1 or 0 respectively.
 
         :param scores: A sorted list of scores
-        :return: The index of the turning point or len(scores) if no big gap found
+        :return: The index of the turning point
         """
 
+        # Elbow method to find cutoff index in sorted scores
         if not scores:
             return -1
         if len(scores) == 1:
             return 0
+    
+        # min_kept = max(len(scores) // 2, 1)
+        min_kept = 1
+        max_kept = (len(scores) * 2) // 3
 
-        score_range = max(scores) - min(scores)
-        if score_range == 0:
-            return len(scores)
+        # Coordinates of points: (index, score)
+        points = [(i, score) for i, score in enumerate(scores)]
 
-        threshold_fraction = 0.15  # 15% of the score range
+        # Line between first and last point
+        start = points[0]
+        end = points[-1]
 
-        max_gap = -1
-        max_gap_index = 0
+        def distance(point, start, end):
+            # Calculate perpendicular distance from point to line (start-end)
+            x0, y0 = point
+            x1, y1 = start
+            x2, y2 = end
+            numerator = abs((y2 - y1)*x0 - (x2 - x1)*y0 + x2*y1 - y2*x1)
+            denominator = ((y2 - y1)**2 + (x2 - x1)**2)**0.5
+            if denominator == 0:
+                return 0
+            return numerator / denominator
 
-        for i in range(len(scores) - 1):
-            gap = abs(scores[i] - scores[i + 1])
-            if gap > max_gap:
-                max_gap = gap
-                max_gap_index = i
+        # Find point with max distance to line
+        max_dist = -1
+        max_index = min_kept
+        for i in range(min_kept, max_kept):
+            dist = distance(points[i], start, end)
+            # Discourage turning points that are too low by adding a small penalty
+            penalty = 0
+            if i < len(scores) // 4:
+                penalty = 0.1  # small penalty to discourage too low turning points
+            dist -= penalty
+            if dist > max_dist:
+                max_dist = dist
+                max_index = i
 
-        if max_gap / score_range < threshold_fraction:
-            return len(scores)
-
-        return max_gap_index + 1
+        return max_index + 1
 
     def select_wh_moves(self, board: chess.Board) -> list[chess.Move]:
         """
@@ -305,222 +331,139 @@ class Computer:
 
         # Game over
         if board.is_game_over():
-            # Explicitly check for draw conditions
-            if board.is_checkmate():
-                if board.result() == "1-0":
-                    return float('inf')
-                elif board.result() == "0-1":
-                    return float('-inf')
-            elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.can_claim_threefold_repetition():
+            if board.result() == "1-0":
+                return float('inf')
+            elif board.result() == "0-1":
+                return float('-inf')
+            else:
                 return 0
-            # fallback for other game over conditions
-            return 0
         
         stage = self.get_game_stage(board)
 
-        PAWNS = {chess.WHITE: [], chess.BLACK: []}
-        for square, piece in board.piece_map().items():
-            if piece.piece_type == chess.PAWN:
-                PAWNS[piece.color].append(square)
-
-
         def evaluate_player(color: chess.Color) -> float:
-
-            def attack() -> float:
-                # Reward squares covered
-                attack_bonus = 0
-                attacked_squares: list[chess.Square] = []
-                for square, piece in board.piece_map().items():
-                    if piece.color == color:
-                        attacked_squares.extend(list(board.attacks(square)))
-                
-                for square in set(attacked_squares):
-                    attack_bonus += attacked_squares.count(square) ** 0.8
-
-                    # Reward centre control
-                    if square in [chess.E4, chess.E5, chess.D4, chess.D5]:
-                        attack_bonus += 2.5 * aggression[color]
-                    # Reward control of enemy half
-                    if color == chess.WHITE and chess.square_rank(square) > 3:
-                        attack_bonus += 1.5 * aggression[color]
-                    elif color == chess.BLACK and chess.square_rank(square) < 4:
-                        attack_bonus += 1.5 * aggression[color]
-
-                    # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
-                    target = board.piece_at(square)
-                    if target is None:
-                        continue
-                    if target.color != color:
-                        attack_bonus += self.MATERIAL[target.piece_type] ** 1.5 * aggression[color]
-                    else:
-                        attack_bonus += self.MATERIAL[target.piece_type] * 2 ** 0.9 * aggression[not color]
-                    
-                return attack_bonus
+            # Reward squares covered
+            attack_bonus = 0
+            attacked_squares: list[chess.Square] = []
+            for square, piece in board.piece_map().items():
+                if piece.color == color:
+                    attacked_squares.extend(list(board.attacks(square)))
             
-            def control() -> float:
-                # Reward pieces per square control
-                control_bonus = 0
-                for square in board.piece_map().keys():
-                    attacks = board.attacks(square)
-                    control_bonus += len(attacks) ** 0.75
+            for square in set(attacked_squares):
+                attack_bonus += attacked_squares.count(square) ** 0.8
 
-                    if square not in [chess.E4, chess.E5, chess.D4, chess.D5]:
-                        continue
-                    piece = board.piece_at(square)
-                    if piece is None or piece.color != color:
-                        continue
-                    control_bonus += self.MATERIAL[piece.piece_type]
-                    if piece == chess.PAWN:
-                        control_bonus += 2
+                # Reward centre control
+                if square in [chess.E4, chess.E5, chess.D4, chess.D5]:
+                    attack_bonus += 2.5 * aggression[color]
+                # Reward control of enemy half
+                if color == chess.WHITE and chess.square_rank(square) > 3:
+                    attack_bonus += 1.5 * aggression[color]
+                elif color == chess.BLACK and chess.square_rank(square) < 4:
+                    attack_bonus += 1.5 * aggression[color]
 
-                return control_bonus
-        
-            def material_score() -> float:
-                return material[color]
-
-            def heatmap() -> float:
-                heatmap_score: float = 0
-                for square, piece in board.piece_map().items():
-                    if piece.color != color:
-                        continue
-                    piece_symbol = piece.symbol().upper()
-
-                    # Convert square index to rank and file
-                    rank = chess.square_rank(square)
-                    file = chess.square_file(square)
-
-                    # Heatmaps are incorrectly oriented for python chess; flip them
-                    if piece.color == chess.WHITE:
-                        rank = 7 - rank
-                    heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file]# * (self.MATERIAL[piece.piece_type] ** 0.5)
-                
-                return heatmap_score
+                # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
+                target = board.piece_at(square)
+                if target is None:
+                    continue
+                attack_bonus += self.MATERIAL[target.piece_type] ** 1.5
             
-            def low_legal_penalty() -> float:
-                # Punish low number of legal moves
-                if color == board.turn:
-                    legal_moves = board.legal_moves
-                else:
-                    board.turn = color
-                    legal_moves = board.legal_moves
-                    board.turn = not color
-                
-                return 1 / len(list(legal_moves))
+            # Reward pieces per square control
+            control_bonus = 0
+            for square in board.piece_map().keys():
+                attacks = board.attacks(square)
+                control_bonus += len(attacks) ** 0.75
 
-            def minor_piece_bonus() -> float:
-                # Bonus for minor piece development
-                minor_piece_development_bonus = 0
-                starting_squares = {
-                    chess.WHITE: {
-                        chess.KNIGHT: [chess.B1, chess.G1],
-                        chess.BISHOP: [chess.C1, chess.F1]
-                    },
-                    chess.BLACK: {
-                        chess.KNIGHT: [chess.B8, chess.G8],
-                        chess.BISHOP: [chess.C8, chess.F8]
-                    }
+                if square not in [chess.E4, chess.E5, chess.D4, chess.D5]:
+                    continue
+                piece = board.piece_at(square)
+                if piece is None or piece.color != color:
+                    continue
+                control_bonus += self.MATERIAL[piece.piece_type]
+                if piece == chess.PAWN:
+                    control_bonus += 2
+
+            # Material
+            material_score = material[color]
+
+            # Heatmap
+            heatmap_score: float = 0
+            for square, piece in board.piece_map().items():
+                if piece.color != color:
+                    continue
+                piece_symbol = piece.symbol().upper()
+
+                # Convert square index to rank and file
+                rank = chess.square_rank(square)
+                file = chess.square_file(square)
+
+                # Heatmaps are incorrectly oriented for python chess; flip them
+                if piece.color == chess.WHITE:
+                    rank = 7 - rank
+                heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file]# * (self.MATERIAL[piece.piece_type] ** 0.5)
+            
+            # Punish low number of legal moves
+            if color == board.turn:
+                legal_moves = board.legal_moves
+            else:
+                old_turn = board.turn
+                board.turn = color
+                legal_moves = board.legal_moves
+                board.turn = old_turn
+
+            # Bonus for minor piece development
+            minor_piece_development_bonus = 0
+            starting_squares = {
+                chess.WHITE: {
+                    chess.KNIGHT: [chess.B1, chess.G1],
+                    chess.BISHOP: [chess.C1, chess.F1]
+                },
+                chess.BLACK: {
+                    chess.KNIGHT: [chess.B8, chess.G8],
+                    chess.BISHOP: [chess.C8, chess.F8]
                 }
-                for square, piece in board.piece_map().items():
-                    if piece.color == color and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
-                        if square not in starting_squares[color][piece.piece_type]:
-                            minor_piece_development_bonus += 1.5  # Bonus for developed minor piece
-                
-                return minor_piece_development_bonus
+            }
+            for square, piece in board.piece_map().items():
+                if piece.color == color and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
+                    if square not in starting_squares[color][piece.piece_type]:
+                        minor_piece_development_bonus += 1.5  # Bonus for developed minor piece
 
-            def queen_penalty_score() -> float:
-                # Might be removed later : Penalty for early queen activity
-                queen_penalty = 0
-                queen_squares = [square for square, piece in board.piece_map().items() if piece.color == color and piece.piece_type == chess.QUEEN]
-                for q_square in queen_squares:
-                    rank = chess.square_rank(q_square)
-                    if stage == 'early':
-                        # Penalize queen on ranks 3,4,5 (too early and too advanced)
-                        if (color == chess.WHITE and rank <= 4) or (color == chess.BLACK and rank >= 3):
-                            queen_penalty += 2.0
-                    elif stage == 'middle':
-                        # Smaller penalty in middle game for queen too advanced
-                        if (color == chess.WHITE and rank <= 3) or (color == chess.BLACK and rank >= 4):
-                            queen_penalty += 1.0
 
-                return queen_penalty
+            # Might be removed later : Penalty for early queen activity
+            queen_penalty = 0
+            queen_squares = [square for square, piece in board.piece_map().items() if piece.color == color and piece.piece_type == chess.QUEEN]
+            for q_square in queen_squares:
+                rank = chess.square_rank(q_square)
+                if stage == 'early':
+                    # Penalize queen on ranks 3,4,5 (too early and too advanced)
+                    if (color == chess.WHITE and rank <= 4) or (color == chess.BLACK and rank >= 3):
+                        queen_penalty += 2.0
+                elif stage == 'middle':
+                    # Smaller penalty in middle game for queen too advanced
+                    if (color == chess.WHITE and rank <= 3) or (color == chess.BLACK and rank >= 4):
+                        queen_penalty += 1.0
             
-            def king_safety_penalty() -> float:
-                # King safety penalties
-                king_penalty = 0
-                # Since python-chess does not have has_castled method, check castling rights and castling status differently
-                # We can check if the castling rights are lost but the king is still on the original square, meaning no castling yet
-                king_start_square = chess.E1 if color == chess.WHITE else chess.E8
-                king = board.king(color)
-                has_moved = king != king_start_square
-                if stage != 'late' and (not board.has_castling_rights(color)) and has_moved:
-                    king_penalty += 10.0
-                if king is None:
-                    return float('-inf') if color == chess.WHITE else float('inf')
-                king_moves = list(board.attacks(king))
-                king_penalty -= len(king_moves) ** 0.5 # Penalise less for more king moves
-
-                return king_penalty
-
-            def pawn_structure() -> float:
-
-                # Evaluate pawn structure
-                pawn_score = 0
-                pawns = PAWNS[color]
-                enemy_pawns = PAWNS[not color]
-                
-                for square in pawns:
-
-                    # Penalise doubled pawns
-                    file = chess.square_file(square)
-                    if any(board.piece_at(chess.square(file, rank)) for rank in range(8) if rank != chess.square_rank(square)):
-                        pawn_score -= 1.0
-
-                    # Reward connected pawns
-                    rank = chess.square_rank(square)
-                    if (board.piece_at(chess.square(file, rank + 1)) and board.piece_at(chess.square(file, rank - 1))) or \
-                       (board.piece_at(chess.square(file - 1, rank)) and board.piece_at(chess.square(file + 1, rank))):
-                        pawn_score += 0.5
-
-                    # Reward passed pawns
-                    # Get files of all enemy pawns
-                    enemy_pawn_files = set(chess.square_file(ep) for ep in enemy_pawns if chess.square_rank(ep) > chess.square_rank(square))
-                    if {file - 1, file, file + 1}.intersection(enemy_pawn_files) == set():
-                        pawn_score += 2.0
-
-
-                    # Penalise isolated pawns
-                    pawn_files = set(chess.square_file(p) for p in pawns)
-                    if {file - 1, file, file + 1}.intersection(pawn_files) == set():
-                        pawn_score -= 1.5
-
-                return pawn_score
-
-            def attack_quality() -> float:
-
-                aggression_score = 0
-                # Reward high-material pieces for being close to the enemy king
-                enemy_king_square = board.king(not color)
-                if enemy_king_square is None:
-                    return float('-inf') if color == chess.WHITE else float('inf')
-
-                # Get distance from enemy king for each piece
-                for square, piece in board.piece_map().items():
-                    if piece.color == color:
-                        aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square))
-
-                return aggression_score
+            # King safety penalties
+            king_penalty = 0
+            # Since python-chess does not have has_castled method, check castling rights and castling status differently
+            # We can check if the castling rights are lost but the king is still on the original square, meaning no castling yet
+            king_start_square = chess.E1 if color == chess.WHITE else chess.E8
+            king = board.king(color)
+            has_moved = king != king_start_square
+            if stage != 'late' and (not board.has_castling_rights(color)) and has_moved:
+                king_penalty += 10.0
+            if king is None:
+                return float('-inf') if color == chess.WHITE else float('inf')
+            king_moves = list(board.attacks(king))
+            king_penalty -= len(king_moves) ** 0.5 # Penalise less for more king moves
 
             score = 0            
-            score -= king_safety_penalty() * 2
-            score -= queen_penalty_score() / aggression[color]
-            score -= (5 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2 * 10) * aggression[color]
-            score += (attack() ** 1.5 * 0.1) * aggression[color]
-            score += heatmap() * 30 * aggression[not color] / aggression[color]
-            score += (control() ** 1.5) * 0.35 * aggression[color]
-            score += minor_piece_bonus() * aggression[color]
-            score += pawn_structure() * 2.5
-            score += attack_quality() * aggression[color] * 10
+            score -= king_penalty * 2
+            score -= queen_penalty / aggression[color]
+            score -= (5 / len(list(legal_moves))) ** 1.5 * (aggression[not color] ** 2)
+            score += (material_score ** 2 * 10) * aggression[color]
+            score += (attack_bonus ** 1.5 * 0.1) * aggression[color]
+            score += (heatmap_score * 15)
+            score += (control_bonus ** 1.5) * 0.35 * aggression[color]
+            score += minor_piece_development_bonus * aggression[color]
 
             return score
         
@@ -584,10 +527,10 @@ class Computer:
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
 
+        print(f"{"white" if board.turn == chess.WHITE else "black"} move")
+
         self.conn = sqlite3.connect(self.TRANSPOSITION_PATH)
         self.cursor = self.conn.cursor()
-
-        print(f"{"white" if board.turn == chess.WHITE else "black"} move")
 
         self.start_time = time.time()
         self.timeout = timeout
@@ -596,7 +539,7 @@ class Computer:
         stored_move = get_stored_winning_move(board)
         if stored_move is not None and stored_move in board.legal_moves:
             print("Using stored winning move")
-            self.conn.close()
+            # self.conn.close()  # Removed to prevent closing connection prematurely
             return stored_move
 
         depth = 1
@@ -609,6 +552,9 @@ class Computer:
 
         move_score_map: list[tuple[chess.Move, float]] = [(move, 0) for move in moves] # Initialize once before loop
 
+        # Keep track of best moves and scores from last few fully completed depths
+        best_moves_history: list[list[tuple[chess.Move, float]]] = []
+
         while not self.is_timeup():
 
             print(f"""DEPTH {depth}: """,end='\t')
@@ -617,7 +563,7 @@ class Computer:
             moves = [move for move, _ in move_score_map]
 
             # Gradually filter out based on the previous scores
-            if depth > 2:
+            if depth > 3:
                 turning_point = self._turning_point([score for _, score in move_score_map])
                 move_score_map = move_score_map[:turning_point]
                 moves = moves[:turning_point]
@@ -631,9 +577,6 @@ class Computer:
 
             # Create a dictionary for quick lookup and update of scores
             move_score_dict = dict(move_score_map)
-
-            current_best_move = None
-            current_best_score = float('-inf') if board.turn == chess.WHITE else float('inf')
 
             for move in moves:
                 board.push(move)
@@ -650,43 +593,22 @@ class Computer:
                     if score is not None:
                         board.pop()
                         move_score_dict[move] = score
-                        # Update current best if needed
-                        if board.turn == chess.WHITE:
-                            if score > current_best_score:
-                                current_best_score = score
-                                current_best_move = move
-                        else:
-                            if score < current_best_score:
-                                current_best_score = score
-                                current_best_move = move
                         continue
                     score = self.minimax(board, depth, float('-inf'), float('inf'), heuristic_eliminate=False)
 
                 board.pop()
-
-                if self.is_timeup():
-                    print("TIMEUP")
-                    save = False
-                    break
-
                 print(f"{board.san(move)} : {score:.2f}",end='\t',flush=True)
                 
                 move_score_dict[move] = score
-
-                # Update current best if needed
-                if board.turn == chess.WHITE:
-                    if score > current_best_score:
-                        current_best_score = score
-                        current_best_move = move
-                else:
-                    if score < current_best_score:
-                        current_best_score = score
-                        current_best_move = move
 
                 self.save_evaluation(board, score, depth)
 
                 if _should_terminate(list(move_score_dict.items())):
                     print("TERMINATED EARLY")
+                    break
+                if self.is_timeup():
+                    print("TIMEUP")
+                    save = False
                     break
             
             print()
@@ -694,16 +616,50 @@ class Computer:
             # Update move_score_map from the dictionary for next iteration
             move_score_map = list(move_score_dict.items())
 
+            # Save the current depth's move scores to history if search completed fully
+            if not self.is_timeup() and not _should_terminate(move_score_map):
+                best_moves_history.append(move_score_map)
+                # Keep only the last 3 depths
+                if len(best_moves_history) > 3:
+                    best_moves_history.pop(0)
+
             # Terminate early if an immediate win is found
             if _should_terminate(move_score_map) or all(score == self.WORST_SCORE for _, score in move_score_map):
                 # Choose best move from current depth
-                best_move = current_best_move if current_best_move is not None else maxmin(move_score_map, key=lambda x: x[1])[0]
+                best_move = maxmin(move_score_map, key=lambda x: x[1])[0]
 
                 # Save the winning move and the position before the move
                 save_winning_move(board, best_move)
                 break
 
-            best_move = current_best_move if current_best_move is not None else maxmin(move_score_map, key=lambda x: x[1])[0]
+            # Choose best move from the last fully completed depths history
+            if best_moves_history:
+                # Aggregate scores for moves appearing in history
+                aggregate_scores = {}
+                for depth_scores in best_moves_history:
+                    for move, score in depth_scores:
+                        aggregate_scores[move] = aggregate_scores.get(move, 0) + score
+                # Average scores
+                for move in aggregate_scores:
+                    aggregate_scores[move] /= len(best_moves_history)
+
+                # If timeout occurred, compare current depth scores with previous depth scores
+                if self.is_timeup() and len(best_moves_history) > 1:
+                    print("Timeout occurred, comparing with previous depth scores")
+                    prev_scores = {move: score for move, score in best_moves_history[-2]}
+                    # Check if all current moves are worse than previous best move
+                    current_best_score = max(aggregate_scores.values()) if board.turn == chess.WHITE else min(aggregate_scores.values())
+                    prev_best_score = max(prev_scores.values()) if board.turn == chess.WHITE else min(prev_scores.values())
+                    if (board.turn == chess.WHITE and current_best_score < prev_best_score) or (board.turn == chess.BLACK and current_best_score > prev_best_score):
+                        # Revert to previous depth's best move
+                        best_move = maxmin(prev_scores.items(), key=lambda x: x[1])[0]
+                    else:
+                        best_move = maxmin(aggregate_scores.items(), key=lambda x: x[1])[0]
+                else:
+                    best_move = maxmin(aggregate_scores.items(), key=lambda x: x[1])[0]
+            else:
+                # Fallback to current depth best move
+                best_move = maxmin(move_score_map, key=lambda x: x[1])[0]
 
             print("BEST:",board.san(best_move))
 
@@ -739,9 +695,7 @@ class Computer:
 def main():
 
     # FEN = "r1bq1rk1/ppp2ppp/2n5/3n2N1/3P4/2PB4/P4PP1/R2QK2R w - - 0 1"
-    # FEN = chess.STARTING_BOARD_FEN
-    # FEN = "rn1qkb1r/ppp2p1p/4bpp1/8/2pP4/2N1P3/PP3PPP/R2QKBNR w KQkq - 1 7"
-    FEN = "8/3k4/8/1R6/6K1/8/8/8 w - - 0 1"
+    FEN = chess.STARTING_BOARD_FEN
 
     board = chess.Board(FEN)
     players = [Computer(board.turn), Computer(not board.turn)]
@@ -749,11 +703,11 @@ def main():
     while not board.is_game_over():
         print(board,"\n\n")
         player = players[0] if board.turn == chess.WHITE else players[1]
-        move = player.best_move(board, timeout=10)
+        move = player.best_move(board, timeout=20)
         if move is None:
             break
-        print("Move:", board.san(move))
         board.push(move)
+        print("Move:", move)
     print(board)
     print("GAME OVER!")
 
