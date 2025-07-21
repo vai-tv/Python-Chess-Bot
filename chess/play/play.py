@@ -3,6 +3,7 @@ import chess
 import chess.pgn
 import os
 import sys
+import time
 
 from datetime import datetime
 
@@ -50,13 +51,13 @@ print(f"Selected players: {args.players[0].capitalize()} vs {args.players[1].cap
 
 def header():
     return f"""
- ----------- {args.players[0].upper().ljust(10)} VS {args.players[1].upper().rjust(10)} ------------
+ ----------- {(f'{args.players[0].upper()} ({WINS[0]})').ljust(10)} VS {(f'({WINS[1]}) {args.players[1].upper()}').rjust(10)} ------------
 | TIME : {(str(args.timeout) + ' SECONDS PER MOVE').rjust(40)} |
 | GAME BEGINS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(30)} |
  -------------------------------------------------
 """
 
-def footer(board: chess.Board, winner: str):
+def footer(board: chess.Board, winner: str, winner_name: str):
     # Create a PGN game from the board's move stack
     game = chess.pgn.Game()
     game.headers["Event"] = "Chess Bot Match"
@@ -76,10 +77,10 @@ def footer(board: chess.Board, winner: str):
     pgn_string = str(game)
 
     return f"""
- ----------- {args.players[0].upper().ljust(10)} VS {args.players[1].upper().rjust(10)} ------------
-| TIME : {(str(args.timeout) + ' SECONDS PER MOVE').rjust(40)} |
+ ----------- {(f'{args.players[0].upper()} ({WINS[0]})').ljust(10)} VS {(f'({WINS[1]}) {args.players[1].upper()}').rjust(10)} ------------
+| BOARD : {(FEN if FEN != chess.STARTING_BOARD_FEN else 'STARTING BOARD').rjust(39)} |
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
-| WINNER : {winner.upper().rjust(38)} |
+| WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
  -------------------------------------------------
 
 {pgn_string}
@@ -91,57 +92,86 @@ SESSION = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 #                                             MAIN LOOP                                            #
 ####################################################################################################
 
-FEN = "8/3k4/1b5R/8/2K2B2/8/p7/8 w - - 0 1"
+FEN = chess.STARTING_FEN  # Starting position FEN
+WINS = [0, 0]  # [Player 1 wins, Player 2 wins]
 
 def main():
+    global players
+    original_players = players.copy()
+    game_count = 0
 
-    MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
+    while True:
+        MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
 
-    if args.log:
-        os.makedirs(os.path.dirname(MOVELOG_PATH), exist_ok=True)
-        MOVELOG_FILE = open(MOVELOG_PATH, 'w')
-    else:
-        MOVELOG_FILE = sys.stdout
-
-    print(f"Game log will be saved to: {MOVELOG_PATH}")
-
-    def print_and_log(*print_args, **kwargs):
-        """Prints to console and logs to file."""
-        print(*print_args, **kwargs)
         if args.log:
-            print(*print_args, file=MOVELOG_FILE, **kwargs)
+            os.makedirs(os.path.dirname(MOVELOG_PATH), exist_ok=True)
+            MOVELOG_FILE = open(MOVELOG_PATH, 'w')
+        else:
+            MOVELOG_FILE = sys.stdout
 
-    board = chess.Board(fen=FEN)
+        print(f"Game log will be saved to: {MOVELOG_PATH}")
 
-    print_and_log(header())
+        def print_and_log(*print_args, **kwargs):
+            """Prints to console and logs to file."""
+            print(*print_args, **kwargs)
+            if args.log:
+                print(*print_args, file=MOVELOG_FILE, **kwargs)
 
-    while not board.is_game_over():
+        # Assign players for this game based on game count to swap colors
+        if game_count % 2 == 0:
+            players = original_players
+        else:
+            players = original_players[::-1]
 
-        for player in players:
+        board = chess.Board(fen=FEN)
 
-            print(board, file=MOVELOG_FILE)
-            print(board, "\n\n")
+        print_and_log(header())
 
-            if board.is_game_over():
-                break
+        while not board.is_game_over():
 
-            move = player(board.turn).best_move(board, timeout=args.timeout)
-            if move is None:
-                return
-            
-            if board.turn == chess.WHITE:
-                print_and_log(f"\n{board.fullmove_number}: {board.san(move)}")
+            for player in players:
+
+                print_and_log(board, "\n\n")
+
+                if board.is_game_over():
+                    break
+
+                move = player(board.turn).best_move(board, timeout=args.timeout)
+                if move is None:
+                    return
+                
+                if board.turn == chess.WHITE:
+                    print_and_log(f"\n{board.fullmove_number}: {board.san(move)}")
+                else:
+                    print_and_log(f"... {board.san(move)}")
+
+                board.push(move)
+
+        print_and_log(board, "\n\n")
+
+        winner = "DRAW"
+        if board.is_game_over() and board.result() != '1/2-1/2':
+            # Determine winner color
+            winner_color = chess.WHITE if board.result() == '1-0' else chess.BLACK
+            winner = "WHITE" if winner_color == chess.WHITE else "BLACK"
+
+            # Map winner color to player index based on players assignment this game
+            winner_index = 0 if winner_color == chess.WHITE else 1
+
+            # Increment wins for the player who had that color this game
+            # Map winner_index to original player index
+            if game_count % 2 == 0:
+                WINS[winner_index] += 1
             else:
-                print_and_log(f"... {board.san(move)}")
+                WINS[1 - winner_index] += 1
+        
+        winner_name = args.players[0].upper() if winner == "WHITE" else args.players[1].upper() if winner == "BLACK" else "DRAW"
 
-            board.push(move)
+        print_and_log(footer(board, winner, winner_name))
 
-    print(board, file=MOVELOG_FILE)
-    print(board, "\n\n")
+        game_count += 1
 
-    winner = "White" if board.result() == "1-0" else "Black" if board.result() == "0-1" else "Draw"
-
-    print_and_log(footer(board, winner))
+        time.sleep(2)
 
 if __name__ == "__main__":
     while True:
