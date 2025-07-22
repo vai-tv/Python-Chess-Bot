@@ -78,7 +78,6 @@ def footer(board: chess.Board, winner: str, winner_name: str):
 
     return f"""
  ----------- {(f'{args.players[0].upper()} ({WINS[0]})').ljust(10)} VS {(f'({WINS[1]}) {args.players[1].upper()}').rjust(10)} ------------
-| BOARD : {(FEN if FEN != chess.STARTING_BOARD_FEN else 'STARTING BOARD').rjust(39)} |
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
 | WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
  -------------------------------------------------
