@@ -1,24 +1,14 @@
 import chess
 import json
 import os
+import requests
 import sqlite3
 import time
+import urllib.parse
 
-__version__ = '1.1.4'
+__version__ = '1.1.5'
 
 class Computer:
-
-    MATERIAL: dict[int, int] = {
-        chess.PAWN: 1,
-        chess.KNIGHT: 3,
-        chess.BISHOP: 3,
-        chess.ROOK: 5,
-        chess.QUEEN: 9,
-        chess.KING: 25
-    }
-
-    HEATMAP_PATH = "chess/global-assets/heatmap.json"
-    HEATMAP = json.load(open(HEATMAP_PATH))
 
     def __init__(self, color: chess.Color):
         self.color = color
@@ -117,21 +107,73 @@ class Computer:
             print(f"Error saving evaluation to DB: {e}")
 
     ##################################################
+    #            OPENING BOOKS AND SYGYZY            #
+    ##################################################
+
+    SYGYZY_URL = "https://tablebase.lichess.ovh/"
+
+    def sygyzy_query(self, board: chess.Board) -> dict:
+        """
+        Query the Syzygy tablebase server for the given board position.
+
+        Args:
+            board (chess.Board): The chess board position to query.
+
+        Returns:
+            dict: The JSON response from the Syzygy tablebase server if successful.
+        
+        Raises:
+            requests.RequestException: If the request to the Syzygy tablebase server fails.
+        """
+
+        fen = board.fen()
+        fen_encoded = urllib.parse.quote(fen)
+
+        url = self.SYGYZY_URL + "standard?fen=" + fen_encoded
+
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise requests.RequestException(f"Request to Syzygy tablebase server failed with status code {response.status_code}")
+
+    def best_sygyzy(self, board: chess.Board) -> chess.Move | None:
+        """
+        Get the best move from the Syzygy tablebase server for the given board position.
+
+        Args:
+            board (chess.Board): The chess board position to get the best move for.
+
+        Returns:
+            chess.Move: The best move from the Syzygy tablebase server.
+            None: If no best move is found.
+        """
+
+        num_pieces = len(board.piece_map().values())
+        if num_pieces > 7: # Syzygy only supports up to 7 pieces
+            return None
+
+        response = self.sygyzy_query(board)
+        print([move["uci"] for move in response["moves"]])
+        return chess.Move.from_uci(response["moves"][0]["uci"])
+
+    ##################################################
     #                   HEURISTICS                   #
     ##################################################
 
-    def _score_weak_heuristic(self, board: chess.Board) -> list[tuple[chess.Move, float]]:
+    def _score_weak_heuristic(self, board: chess.Board, weak_depth: int = 0) -> list[tuple[chess.Move, float]]:
         """
         Evaluate and score each legal move from the current board position using the Minimax algorithm 
         without heuristic sorting or elimination.
 
         :param board: The current state of the chess board.
         :type board: chess.Board
+        :param weak_depth: The depth to search in the Minimax algorithm.
+        :type weak_depth: int
         :return: A list of tuples containing legal moves and their corresponding scores.
         :rtype: list[tuple[chess.Move, float]]
         """
 
-        weak_depth = 0
         move_score_map: list[tuple[chess.Move, float]] = []
 
         for move in board.legal_moves:
@@ -142,17 +184,19 @@ class Computer:
         
         return move_score_map
 
-    def weak_heuristic_moves(self, board: chess.Board) -> list[chess.Move]:
+    def weak_heuristic_moves(self, board: chess.Board, depth: int = 0) -> list[chess.Move]:
         """
         Generate a list of moves in weak heuristic order.
 
         :param board: The current state of the board
         :type board: chess.Board
+        :param depth: The depth to search in the Minimax algorithm
+        :type depth: int
         :return: A list of moves in weak heuristic order
         :rtype: list[chess.Move]
         """
 
-        move_score_map = self._score_weak_heuristic(board)
+        move_score_map = self._score_weak_heuristic(board, depth)
         
         # Sort moves by score
         sorted_moves = sorted(move_score_map, key=lambda x: x[1], reverse=board.turn == chess.WHITE)
@@ -194,17 +238,19 @@ class Computer:
 
         return max_gap_index + 1
 
-    def select_wh_moves(self, board: chess.Board) -> list[chess.Move]:
+    def select_wh_moves(self, board: chess.Board, depth: int = 0) -> list[chess.Move]:
         """
         Select some moves worth exploring based on a weak heuristic.
 
         :param board: The current state of the board
         :type board: chess.Board
+        :param depth: The depth to search in the Minimax algorithm
+        :type depth: int
         :return: A list of moves in weak heuristic order
         :rtype: list[chess.Move]
         """
 
-        move_score_map = self._score_weak_heuristic(board)
+        move_score_map = self._score_weak_heuristic(board, depth)
         
         # Sort moves by score
         sorted_moves = sorted(move_score_map, key=lambda x: x[1], reverse=board.turn == chess.WHITE)
@@ -253,7 +299,19 @@ class Computer:
     #                   EVALUATION                   #
     ##################################################
 
-    def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, heuristic_sort: bool = True, heuristic_eliminate: bool = True, use_mvv_lva: bool = False) -> float:
+    HEATMAP_PATH = "chess/global-assets/heatmap.json"
+    HEATMAP = json.load(open(HEATMAP_PATH))
+
+    MATERIAL: dict[int, int] = {
+        chess.PAWN: 1,
+        chess.KNIGHT: 3,
+        chess.BISHOP: 3,
+        chess.ROOK: 5,
+        chess.QUEEN: 9,
+        chess.KING: 25
+    }
+
+    def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, original_depth: int = 0, heuristic_sort: bool = True, heuristic_eliminate: bool = True, use_mvv_lva: bool = False) -> float:
         """
         Evaluate the best move to make using the Minimax algorithm.
 
@@ -265,6 +323,8 @@ class Computer:
         :type alpha: float
         :param beta: The best score possible for the minimizing player
         :type beta: float
+        :param original_depth: The original depth of the search
+        :type original_depth: int
         :param heuristic_sort: Whether to sort moves by heuristic score
         :type heuristic_sort: bool
         :param heuristic_eliminate: Whether to eliminate moves with low heuristic scores
@@ -291,8 +351,10 @@ class Computer:
         best_score = float('-inf') if is_maximizing else float('inf')
         best_move = None
 
-        if heuristic_eliminate:
-            legals = self.select_wh_moves(board)
+        search_depth = original_depth - depth
+
+        if heuristic_eliminate or search_depth >= 3: # Begin heuristic elimination if the search is 3 or more moves deep
+            legals = self.select_wh_moves(board, 1)
         elif heuristic_sort:
             legals = self.weak_heuristic_moves(board)
         else:
@@ -303,7 +365,7 @@ class Computer:
 
         for move in legals:
             board.push(move)
-            score = self.minimax(board, depth - 1, alpha, beta, heuristic_sort=heuristic_sort, heuristic_eliminate=heuristic_eliminate, use_mvv_lva=use_mvv_lva)
+            score = self.minimax(board, depth - 1, alpha, beta, heuristic_sort=heuristic_sort, original_depth=original_depth, heuristic_eliminate=heuristic_eliminate, use_mvv_lva=use_mvv_lva)
             board.pop()
 
             if is_maximizing:
@@ -363,12 +425,14 @@ class Computer:
             if piece.piece_type == chess.PAWN:
                 PAWNS[piece.color].append(square)
 
+        KINGS = {chess.WHITE : board.king(chess.WHITE), chess.BLACK : board.king(chess.BLACK)}
+
         def evaluate_player(color: chess.Color) -> float:
 
-            king_square = board.king(color)
-
-            if king_square is None:
-                return float('-inf') if color == chess.WHITE else float('inf')
+            king_square = KINGS[color]
+            enemy_king_square = KINGS[not color]
+            if king_square is None or enemy_king_square is None:
+                return 0
 
             def attack() -> float:
                 # Reward squares covered
@@ -522,7 +586,6 @@ class Computer:
 
             def pawn_structure() -> float:
 
-                # Improved pawn structure evaluation
                 pawn_score = 0
                 pawns = PAWNS[color]
                 enemy_pawns = PAWNS[not color]
@@ -578,12 +641,8 @@ class Computer:
 
                 aggression_score = 0
                 # Reward high-material pieces for being close to the enemy king
-                enemy_king_square = board.king(not color)
-                if enemy_king_square is None:
-                    return float('-inf') if color == chess.WHITE else float('inf')
-
                 # Get distance from enemy king for each piece
-                for square, piece in board.piece_map().items():
+                for square, piece in piece_map.items():
                     if piece.color == color:
                         aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square))
 
@@ -602,8 +661,8 @@ class Computer:
             score -= (5 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
             score += (material_score() ** 2 * 10)
             score += (attack() ** 1.1 * 0.1) * aggression[color]
-            score += heatmap() ** 3 * aggression[not color]
-            score += (control() * 1.25) * 0.35 * aggression[color]
+            score += heatmap() ** 3 * aggression[not color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
+            score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += minor_piece_bonus() * 10 * aggression[color]
             score += pawn_structure() * 10
             score += attack_quality() * aggression[color] * 20
@@ -695,6 +754,14 @@ class Computer:
         self.start_time = time.time()
         self.timeout = timeout
 
+        # Get Sygyzy best move
+        syg_best = self.best_sygyzy(board)
+        if syg_best is not None:
+            print("Using Sygzy best move")
+            self.conn.close()
+            return syg_best
+
+
         # Check if there is a stored winning move for the current position
         stored_move = get_stored_winning_move(board)
         if stored_move is not None and stored_move in board.legal_moves:
@@ -738,6 +805,7 @@ class Computer:
             current_best_move = None
             current_best_score = float('-inf') if board.turn == chess.WHITE else float('inf')
 
+            # Evaluate each mmove
             for move in moves:
                 board.push(move)
 
@@ -749,7 +817,9 @@ class Computer:
                         continue
                 # ^^ CURRENTLY UNREACHABLE ^^
                 else:
+                    # Check if the move has already been evaluated
                     score = self.evaluate_from_db(board, depth)
+
                     if score is not None:
                         board.pop()
                         move_score_dict[move] = score
@@ -763,8 +833,9 @@ class Computer:
                                 current_best_score = score
                                 current_best_move = move
                         continue
-                score = self.minimax(board, depth, float('-inf'), float('inf'), heuristic_eliminate=False, use_mvv_lva=True)
-
+                
+                # Minimax
+                score = self.minimax(board, depth, float('-inf'), float('inf'), original_depth=depth, heuristic_eliminate=False, use_mvv_lva=True)
                 board.pop()
 
                 if self.is_timeup():
@@ -841,7 +912,7 @@ class Computer:
 
 def main():
 
-    FEN = chess.STARTING_BOARD_FEN
+    FEN = "8/1p6/ppp3kP/6P1/1K3P2/4P3/8/8 w - - 0 1"
 
     board = chess.Board(FEN)
     players = [Computer(board.turn), Computer(not board.turn)]
@@ -849,10 +920,10 @@ def main():
     while not board.is_game_over():
         print(board,"\n\n")
         player = players[0] if board.turn == chess.WHITE else players[1]
-        move = player.best_move(board, timeout=180)
+        move = player.best_move(board, timeout=20)
         if move is None:
             break
-        print("Move:", board.san(move))
+        print("\n\nMove:", board.san(move))
         board.push(move)
     print(board)
     print("GAME OVER!")
