@@ -59,14 +59,16 @@ def header():
 """
 
 def footer(board: chess.Board, winner: str, winner_name: str):
+    index = game_count % 2
+
     # Create a PGN game from the board's move stack
     game = chess.pgn.Game()
     game.headers["Event"] = "Chess Bot Match"
     game.headers["Site"] = "Local"
     game.headers["Date"] = datetime.now().strftime('%Y.%m.%d')
     game.headers["Round"] = "1"
-    game.headers["White"] = args.players[0].capitalize()
-    game.headers["Black"] = args.players[1].capitalize()
+    game.headers["White"] = args.players[index].capitalize()
+    game.headers["Black"] = args.players[1 - index].capitalize()
     game.headers["Result"] = board.result()
 
     # Set the FEN header if the board is not in the starting position
@@ -76,8 +78,6 @@ def footer(board: chess.Board, winner: str, winner_name: str):
     for move in board.move_stack:
         node = node.add_variation(move)
     pgn_string = str(game)
-
-    index = game_count % 2
 
     return f"""
  ----------- {(f'{args.players[index].upper()} ({WINS[index]})').ljust(10)} VS {(f'({WINS[1 - index]}) {args.players[1 - index].upper()}').rjust(10)} ------------
@@ -183,4 +183,3 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"An error occurred: {e.__class__.__name__} {e}")
             print("Restarting the game...")
-            raise e
