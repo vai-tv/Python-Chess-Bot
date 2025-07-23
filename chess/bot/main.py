@@ -1,6 +1,6 @@
 import chess
 import json
-import os
+import random as rnd
 import requests
 import sqlite3
 import time
@@ -18,6 +18,9 @@ class Computer:
 
         self.timeout: float | None = None
         self.start_time: float | None = None
+
+        # Initialize killer moves dictionary: depth -> list of killer moves
+        self.killer_moves: dict[int, list[chess.Move]] = {}
 
         self.init_db()
 
@@ -110,7 +113,10 @@ class Computer:
     #            OPENING BOOKS AND SYGYZY            #
     ##################################################
 
-    SYGYZY_URL = "https://tablebase.lichess.ovh/"
+    SYGYZY_URL = "https://tablebase.lichess.ovh/standard?fen="
+    OPENING_URL = "https://explorer.lichess.ovh/master?fen="
+
+    OPENING_LEAVE_CHANCE = 0.05  # Chance to leave the opening book
 
     def sygyzy_query(self, board: chess.Board) -> dict:
         """
@@ -129,7 +135,7 @@ class Computer:
         fen = board.fen()
         fen_encoded = urllib.parse.quote(fen)
 
-        url = self.SYGYZY_URL + "standard?fen=" + fen_encoded
+        url = self.SYGYZY_URL + fen_encoded
 
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
@@ -156,6 +162,56 @@ class Computer:
         response = self.sygyzy_query(board)
         print([move["uci"] for move in response["moves"]])
         return chess.Move.from_uci(response["moves"][0]["uci"])
+
+    def opening_query(self, board: chess.Board) -> dict:
+        """
+        Query the opening book for the best move in the given board position.
+
+        Args:
+            board (chess.Board): The chess board position to query.
+
+        Returns:
+            dict: The JSON response from the opening book server if successful.
+
+        Raises:
+            requests.RequestException: If the request to the opening book server fails.
+        """
+
+        fen = board.fen()
+        fen_encoded = urllib.parse.quote(fen)
+
+        url = self.OPENING_URL + fen_encoded
+
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise requests.RequestException(f"Request to opening book server failed with status code {response.status_code}")
+
+    def random_opening_move(self, board: chess.Board) -> chess.Move | None:
+        """
+        Get a random move from the opening book for the given board position.
+
+        Args:
+            board (chess.Board): The chess board position to get a random opening move for.
+
+        Returns:
+            chess.Move: A random move from the opening book.
+            None: If no moves are available in the opening book or the opening leave chance is not met.
+        """
+
+        odds = 1 - (1 - self.OPENING_LEAVE_CHANCE) ** (board.fullmove_number / 2)
+        if rnd.random() < odds and board.fullmove_number > 5:
+            return None
+
+        response = self.opening_query(board)
+        if "moves" in response and response["moves"]:
+            moves = response["moves"]
+
+            weights = [move["white"] + move["black"] + move["draws"] for move in moves]
+            chosen_move = rnd.choices(moves, weights=weights, k=1)[0]
+            return chess.Move.from_uci(chosen_move["uci"])
+        return None
 
     ##################################################
     #                   HEURISTICS                   #
@@ -353,17 +409,33 @@ class Computer:
 
         search_depth = original_depth - depth
 
-        if heuristic_eliminate or search_depth >= 3: # Begin heuristic elimination if the search is 3 or more moves deep
-            legals = self.select_wh_moves(board, 1)
-        elif heuristic_sort:
-            legals = self.weak_heuristic_moves(board)
-        else:
-            legals = list(board.legal_moves)
+        # Null Move Pruning (NMP)
+        R = 2  # Reduction for null move pruning
+        if depth > 2 and not board.is_check():
+            board.push(chess.Move.null())
+            null_score = -self.minimax(board, depth - 1 - R, -beta, -beta + 1, original_depth=original_depth, heuristic_sort=heuristic_sort, heuristic_eliminate=heuristic_eliminate, use_mvv_lva=use_mvv_lva)
+            board.pop()
+            if null_score >= beta:
+                return null_score
 
+        # Move ordering with Killer Move Heuristics (KMH) and MVV-LVA prioritization
+        legals = list(board.legal_moves)
+
+        # Prioritize killer moves at this depth
+        killer_moves_at_depth = self.killer_moves.get(search_depth, [])
+
+        # Separate killer moves and other moves
+        killer_moves_in_legals = [move for move in killer_moves_at_depth if move in legals]
+        other_moves = [move for move in legals if move not in killer_moves_in_legals]
+
+        # Order other moves with MVV-LVA if enabled
         if use_mvv_lva:
-            legals = self.mvv_lva_ordering(board, legals)
+            other_moves = self.mvv_lva_ordering(board, other_moves)
 
-        for move in legals:
+        # Combine killer moves first, then other moves
+        ordered_moves = killer_moves_in_legals + other_moves
+
+        for move in ordered_moves:
             board.push(move)
             score = self.minimax(board, depth - 1, alpha, beta, heuristic_sort=heuristic_sort, original_depth=original_depth, heuristic_eliminate=heuristic_eliminate, use_mvv_lva=use_mvv_lva)
             board.pop()
@@ -379,7 +451,17 @@ class Computer:
                     best_move = move
                 beta = min(beta, best_score)
 
+            # Update killer moves on beta cutoff with non-capturing moves
             if beta <= alpha:
+                if not board.is_capture(move):
+                    # Add move to killer moves for this depth if not already present
+                    if search_depth not in self.killer_moves:
+                        self.killer_moves[search_depth] = []
+                    if move not in self.killer_moves[search_depth]:
+                        self.killer_moves[search_depth].append(move)
+                        # Limit to 2 killer moves per depth
+                        if len(self.killer_moves[search_depth]) > 2:
+                            self.killer_moves[search_depth].pop(0)
                 break
 
         # If this position leads to a winning score, save the winning move
@@ -434,13 +516,13 @@ class Computer:
             if king_square is None or enemy_king_square is None:
                 return 0
 
-            def attack() -> float:
+            def coverage() -> float:
                 # Reward squares covered
                 attack_bonus = 0
                 cover_bonus = 0
 
                 attacked_squares: list[chess.Square] = []
-                for square, piece in board.piece_map().items():
+                for square, piece in piece_map.items():
                     if piece.color == color:
                         attacks = board.attacks(square)
                         attacked_squares.extend(list(attacks))
@@ -502,7 +584,27 @@ class Computer:
                 return control_bonus
         
             def material_score() -> float:
-                return material[color]
+                # Base material score
+                base_score = material[color]
+
+                # Add stronger dependency based on how many squares each piece takes up (mobility)
+                mobility_score = 0
+                for square, piece in piece_map.items():
+                    if piece.color == color:
+                        attacks = board.attacks(square)
+                        mobility_count = len(attacks)
+                        # Weight mobility more heavily, with nonlinear scaling
+                        piece_weight = {
+                            chess.PAWN: 0.5,
+                            chess.KNIGHT: 1.5,
+                            chess.BISHOP: 1.7,
+                            chess.ROOK: 1.2,
+                            chess.QUEEN: 1.0,
+                            chess.KING: 0.3
+                        }.get(piece.piece_type, 1.0)
+                        mobility_score += (mobility_count ** 0.75) * piece_weight * 0.5
+
+                return base_score + mobility_score
 
             def heatmap() -> float:
                 heatmap_score: float = 0
@@ -518,7 +620,7 @@ class Computer:
                     # Heatmaps are incorrectly oriented for python chess; flip them
                     if piece.color == chess.WHITE:
                         rank = 7 - rank
-                    heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file]# * (self.MATERIAL[piece.piece_type] ** 0.5)
+                    heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file]
                 
                 return heatmap_score
             
@@ -553,23 +655,6 @@ class Computer:
                 
                 return minor_piece_development_bonus
 
-            def queen_penalty_score() -> float:
-                # Might be removed later : Penalty for early queen activity
-                queen_penalty = 0
-                queen_squares = [square for square, piece in board.piece_map().items() if piece.color == color and piece.piece_type == chess.QUEEN]
-                for q_square in queen_squares:
-                    rank = chess.square_rank(q_square)
-                    if stage == 'early':
-                        # Penalize queen on ranks 3,4,5 (too early and too advanced)
-                        if (color == chess.WHITE and rank <= 4) or (color == chess.BLACK and rank >= 3):
-                            queen_penalty += 2.0
-                    elif stage == 'middle':
-                        # Smaller penalty in middle game for queen too advanced
-                        if (color == chess.WHITE and rank <= 3) or (color == chess.BLACK and rank >= 4):
-                            queen_penalty += 1.0
-
-                return queen_penalty
-            
             def king_safety_penalty() -> float:
                 # King safety penalties
                 king_penalty = 0
@@ -644,28 +729,27 @@ class Computer:
                 # Get distance from enemy king for each piece
                 for square, piece in piece_map.items():
                     if piece.color == color:
-                        aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square))
+                        aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square)) * 5
 
                 # Reward / penalise checks
                 if board.is_check():
                     if board.turn == color:
                         aggression_score -= 1
                     else:
-                        aggression_score += 2
+                        aggression_score += 1
 
                 return aggression_score
 
             score = 0            
-            score -= king_safety_penalty() * 2
-            score -= queen_penalty_score() / aggression[color]
-            score -= (5 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2 * 10)
-            score += (attack() ** 1.1 * 0.1) * aggression[color]
-            score += heatmap() ** 3 * aggression[not color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
+            score -= king_safety_penalty() * 4
+            score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
+            score += (material_score() ** 2 * 20)
+            score += (coverage() ** 1.1 * 0.1) * aggression[color]
+            score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
             score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
-            score += minor_piece_bonus() * 10 * aggression[color]
-            score += pawn_structure() * 10
-            score += attack_quality() * aggression[color] * 20
+            score += minor_piece_bonus() * 15 * aggression[color]
+            score += pawn_structure() * 10 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
+            score += attack_quality() ** 1.2 * aggression[color] * 15
 
             # print("\nAGG", aggression[color])
             # print("EAG", aggression[not color])
@@ -753,6 +837,13 @@ class Computer:
 
         self.start_time = time.time()
         self.timeout = timeout
+
+        # First try a random opening move
+        opening_best = self.random_opening_move(board)
+        if opening_best is not None:
+            print("Using random opening move")
+            self.conn.close()
+            return opening_best
 
         # Get Sygyzy best move
         syg_best = self.best_sygyzy(board)
@@ -897,10 +988,10 @@ class Computer:
     def get_game_stage(self, board: chess.Board) -> str:
         """Return the current stage of the game."""
 
-        num_pieces = len(board.piece_map().values())
-        if num_pieces > 20:
+        num_pieces = len([piece for piece in board.piece_map().values() if piece.piece_type != chess.PAWN])
+        if num_pieces >= 12:
             return "early"
-        elif num_pieces > 10:
+        elif num_pieces >= 8:
             return "middle"
         else:
             return "late"
@@ -912,7 +1003,8 @@ class Computer:
 
 def main():
 
-    FEN = "8/1p6/ppp3kP/6P1/1K3P2/4P3/8/8 w - - 0 1"
+    # FEN = "8/1p6/ppp3kP/6P1/1K3P2/4P3/8/8 w - - 0 1"
+    FEN = chess.STARTING_FEN
 
     board = chess.Board(FEN)
     players = [Computer(board.turn), Computer(not board.turn)]
