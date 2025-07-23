@@ -29,9 +29,9 @@ parser.add_argument(
 )
 parser.add_argument(
     '-t', '--timeout', '--time',
-    type=int,
+    type=float,
     help="Set the timeout for each player in seconds.",
-    default=10
+    default=10.0
 )
 parser.add_argument(
     '-l', '--log',
@@ -50,8 +50,11 @@ print(f"Selected players: {args.players[0].capitalize()} vs {args.players[1].cap
 ####################################################################################################
 
 def header():
+
+    index = game_count % 2
+
     return f"""
- ----------- {(f'{args.players[0].upper()} ({WINS[0]})').ljust(10)} VS {(f'({WINS[1]}) {args.players[1].upper()}').rjust(10)} ------------
+ ----------- {(f'{args.players[index].upper()} ({WINS[index]})').ljust(10)} VS {(f'({WINS[1 - index]}) {args.players[1 - index].upper()}').rjust(10)} ------------
 | TIME : {(str(args.timeout) + ' SECONDS PER MOVE').rjust(40)} |
 | GAME BEGINS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(30)} |
  -------------------------------------------------
@@ -76,8 +79,10 @@ def footer(board: chess.Board, winner: str, winner_name: str):
         node = node.add_variation(move)
     pgn_string = str(game)
 
+    index = game_count % 2
+
     return f"""
- ----------- {(f'{args.players[0].upper()} ({WINS[0]})').ljust(10)} VS {(f'({WINS[1]}) {args.players[1].upper()}').rjust(10)} ------------
+ ----------- {(f'{args.players[index].upper()} ({WINS[index]})').ljust(10)} VS {(f'({WINS[1 - index]}) {args.players[1 - index].upper()}').rjust(10)} ------------
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
 | WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
  -------------------------------------------------
@@ -92,10 +97,10 @@ SESSION = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 ####################################################################################################
 
 FEN = chess.STARTING_FEN  # Starting position FEN
-WINS = [0, 0]  # [Player 1 wins, Player 2 wins]
+WINS = [0, 0]  # Initialize win counts for players
 
 def main():
-    global players
+    global players, game_count
     original_players = players.copy()
     game_count = 0
 
@@ -149,22 +154,20 @@ def main():
         print_and_log(board, "\n\n")
 
         winner = "DRAW"
+        winner_name = "DRAW"
         if board.is_game_over() and board.result() != '1/2-1/2':
             # Determine winner color
             winner_color = chess.WHITE if board.result() == '1-0' else chess.BLACK
             winner = "WHITE" if winner_color == chess.WHITE else "BLACK"
 
-            # Map winner color to player index based on players assignment this game
-            winner_index = 0 if winner_color == chess.WHITE else 1
-
-            # Increment wins for the player who had that color this game
-            # Map winner_index to original player index
+            # Increment wins
+            win_index = 0 if winner == "WHITE" else 1
             if game_count % 2 == 0:
-                WINS[winner_index] += 1
+                WINS[win_index] += 1
+                winner_name = args.players[win_index].upper()
             else:
-                WINS[1 - winner_index] += 1
-        
-        winner_name = args.players[0].upper() if winner == "WHITE" else args.players[1].upper() if winner == "BLACK" else "DRAW"
+                WINS[1 - win_index] += 1
+                winner_name = args.players[1 - win_index].upper()
 
         print_and_log(footer(board, winner, winner_name))
 
@@ -180,5 +183,6 @@ if __name__ == "__main__":
             print("\nGame interrupted by user.")
             break
         except Exception as e:
-            print(f"An error occurred: {e}")
+            print(f"An error occurred: {e.__class__.__name__} {e}")
             print("Restarting the game...")
+            raise e
