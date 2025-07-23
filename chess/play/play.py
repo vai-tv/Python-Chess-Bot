@@ -50,9 +50,7 @@ print(f"Selected players: {args.players[0].capitalize()} vs {args.players[1].cap
 ####################################################################################################
 
 def header():
-
     index = game_count % 2
-
     return f"""
  ----------- {(f'{args.players[index].upper()} ({WINS[index]})').ljust(10)} VS {(f'({WINS[1 - index]}) {args.players[1 - index].upper()}').rjust(10)} ------------
 | TIME : {(str(args.timeout) + ' SECONDS PER MOVE').rjust(40)} |
