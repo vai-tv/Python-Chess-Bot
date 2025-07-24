@@ -6,7 +6,7 @@ import sqlite3
 import time
 import urllib.parse
 
-__version__ = '1.1.5'
+__version__ = '1.1.6'
 
 class Computer:
 
@@ -116,7 +116,7 @@ class Computer:
     SYGYZY_URL = "https://tablebase.lichess.ovh/standard?fen="
     OPENING_URL = "https://explorer.lichess.ovh/master?fen="
 
-    OPENING_LEAVE_CHANCE = 0.05  # Chance to leave the opening book
+    OPENING_LEAVE_CHANCE = 0.1  # Chance to leave the opening book
 
     def sygyzy_query(self, board: chess.Board) -> dict:
         """
@@ -359,7 +359,7 @@ class Computer:
     HEATMAP = json.load(open(HEATMAP_PATH))
 
     MATERIAL: dict[int, int] = {
-        chess.PAWN: 1,
+        chess.PAWN: 2,  # Increased pawn value to make losing pawns more costly
         chess.KNIGHT: 3,
         chess.BISHOP: 3,
         chess.ROOK: 5,
@@ -400,8 +400,13 @@ class Computer:
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
 
+        # Check for claimable draw conditions and treat as terminal draw state
+        if board.can_claim_fifty_moves() or board.can_claim_threefold_repetition() or board.is_fivefold_repetition() or board.is_seventyfive_moves():
+            return 0.0
+
         if depth == 0 or board.is_game_over() or self.is_timeup():
             return self.evaluate(board)
+
 
         is_maximizing = board.turn == chess.WHITE
         best_score = float('-inf') if is_maximizing else float('inf')
@@ -684,11 +689,35 @@ class Computer:
 
                     # Penalize doubled pawns: more than one pawn on the same file
                     if pawn_files.count(file) > 1:
-                        pawn_score -= 1.5
+                        pawn_score -= 3.0  # Increased penalty
 
                     # Penalize isolated pawns: no friendly pawns on adjacent files
                     if (file - 1 not in pawn_files) and (file + 1 not in pawn_files):
-                        pawn_score -= 1.5
+                        pawn_score -= 3.0  # Increased penalty
+
+                    # Penalize backward pawns: pawns that cannot be defended by other pawns and are behind the pawn chain
+                    is_backward = False
+                    if color == chess.WHITE:
+                        for adj_file in [file - 1, file + 1]:
+                            if 0 <= adj_file <= 7:
+                                adj_squares = [chess.square(adj_file, r) for r in range(rank)]
+                                if not any(sq in pawns for sq in adj_squares):
+                                    is_backward = True
+                    else:
+                        for adj_file in [file - 1, file + 1]:
+                            if 0 <= adj_file <= 7:
+                                adj_squares = [chess.square(adj_file, r) for r in range(rank + 1, 8)]
+                                if not any(sq in pawns for sq in adj_squares):
+                                    is_backward = True
+                    if is_backward:
+                        pawn_score -= 2.0
+
+                    # Penalize hanging pawns: pawns that are undefended and can be captured easily
+                    piece = board.piece_at(square)
+                    if piece is not None:
+                        defenders = board.attackers(color, square)
+                        if len(defenders) == 0:
+                            pawn_score -= 2.5
 
                     # Reward connected pawns: pawns on adjacent files and ranks
                     connected = False
@@ -748,7 +777,7 @@ class Computer:
             score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
             score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += minor_piece_bonus() * 15 * aggression[color]
-            score += pawn_structure() * 10 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
+            score += pawn_structure() * 15 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += attack_quality() ** 1.2 * aggression[color] * 15
 
             # print("\nAGG", aggression[color])
