@@ -116,7 +116,7 @@ class Computer:
     SYGYZY_URL = "https://tablebase.lichess.ovh/standard?fen="
     OPENING_URL = "https://explorer.lichess.ovh/master?fen="
 
-    OPENING_LEAVE_CHANCE = 0.1  # Chance to leave the opening book
+    OPENING_LEAVE_CHANCE = 0.01  # Initial chance to leave the opening book, increases over time
 
     def sygyzy_query(self, board: chess.Board) -> dict:
         """
@@ -200,11 +200,16 @@ class Computer:
             None: If no moves are available in the opening book or the opening leave chance is not met.
         """
 
-        odds = 1 - (1 - self.OPENING_LEAVE_CHANCE) ** (board.fullmove_number / 2)
-        if rnd.random() < odds and board.fullmove_number > 5:
+        odds = 1 - (1 - self.OPENING_LEAVE_CHANCE) ** board.fullmove_number
+        if rnd.random() < odds and board.fullmove_number > 7:
             return None
 
-        response = self.opening_query(board)
+        try:
+            response = self.opening_query(board)
+        except requests.RequestException as e:
+            print(f"Error querying opening book: {e}")
+            return None
+        
         if "moves" in response and response["moves"]:
             moves = response["moves"]
 
@@ -359,7 +364,7 @@ class Computer:
     HEATMAP = json.load(open(HEATMAP_PATH))
 
     MATERIAL: dict[int, int] = {
-        chess.PAWN: 2,  # Increased pawn value to make losing pawns more costly
+        chess.PAWN: 1,
         chess.KNIGHT: 3,
         chess.BISHOP: 3,
         chess.ROOK: 5,
@@ -502,7 +507,7 @@ class Computer:
                     return float('-inf')
             elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.can_claim_threefold_repetition():
                 return 0
-            # fallback for other game over conditions
+            # Fallback for other game over conditions
             return 0
         
         stage = self.get_game_stage(board)
@@ -522,10 +527,10 @@ class Computer:
                 return 0
 
             def coverage() -> float:
-                # Reward squares covered
                 attack_bonus = 0
                 cover_bonus = 0
 
+                # Reward squares covered
                 attacked_squares: list[chess.Square] = []
                 for square, piece in piece_map.items():
                     if piece.color == color:
@@ -536,8 +541,8 @@ class Computer:
                         cover_bonus += len(attacked_squares) / self.MATERIAL[piece.piece_type]
                 
                 for square in set(attacked_squares):
+                    # Exponentially reward squares attacked by multiple pieces
                     attack_bonus += attacked_squares.count(square) ** 1.25
-                    attack_bonus **= 0.5
 
                     piece = board.piece_at(square)
                     rank = chess.square_rank(square)
@@ -556,17 +561,17 @@ class Computer:
 
                     # Reward pieces in the enemy half
                     if color == chess.WHITE and rank > 3:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[not color]
+                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[color]
                     elif color == chess.BLACK and rank < 4:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[not color]
+                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[color]
 
                     # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                     if piece.color != color:
                         attack_bonus += self.MATERIAL[piece.piece_type] ** 1.5 * aggression[color]
                     else:
                         attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.9 * aggression[not color]
-                    
-                return attack_bonus + cover_bonus
+                
+                return attack_bonus ** 0.5 + cover_bonus
             
             def control() -> float:
                 # Reward pieces per square control
@@ -1044,7 +1049,7 @@ def main():
         move = player.best_move(board, timeout=20)
         if move is None:
             break
-        print("\n\nMove:", board.san(move))
+        print(f"\n\n{board.fullmove_number}. {board.san(move)}")
         board.push(move)
     print(board)
     print("GAME OVER!")
