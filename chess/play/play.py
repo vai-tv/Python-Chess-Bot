@@ -66,7 +66,7 @@ def footer(board: chess.Board, winner: str, winner_name: str):
     game.headers["Event"] = "Chess Bot Match"
     game.headers["Site"] = "Local"
     game.headers["Date"] = datetime.now().strftime('%Y.%m.%d')
-    game.headers["Round"] = "1"
+    game.headers["Round"] = str(game_count + 1)
     game.headers["White"] = args.players[index].capitalize()
     game.headers["Black"] = args.players[1 - index].capitalize()
     game.headers["Result"] = board.result()
