@@ -8,13 +8,13 @@ class Computer:
         self.color = color
 
     def best_move(self, board: chess.Board, *, timeout: float=float('inf')) -> chess.Move:
-        move = input("Enter your move: ")
-
         while True:
+            move = input("Enter your move in SAN notation: ")
             try:
-                if chess.Move.from_uci(move) in board.legal_moves:
-                    return chess.Move.from_uci(move)
+                move_obj = board.parse_san(move)
+                if move_obj in board.legal_moves:
+                    return move_obj
                 else:
                     print("Invalid move: Illegal move.")
-            except chess.InvalidMoveError:
-                print("Invalid move: Not a UCI string.")
+            except ValueError:
+                print("Invalid move: Not a valid SAN string.")
