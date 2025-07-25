@@ -568,6 +568,12 @@ class Computer:
                     elif color == chess.BLACK and rank < 4:
                         attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[color]
 
+                    # Penalise pieces on the back 2 ranks
+                    if color == chess.WHITE and rank < 2:
+                        attack_bonus -= self.MATERIAL[piece.piece_type] * 1.5 ** 0.6 * aggression[color]
+                    elif color == chess.BLACK and rank > 5:
+                        attack_bonus -= self.MATERIAL[piece.piece_type] * 1.5 ** 0.6 * aggression[color]
+
                     # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                     if piece.color != color:
                         # Attack
@@ -682,6 +688,11 @@ class Computer:
                 king_moves = list(board.attacks(king_square))
                 king_penalty -= len(king_moves) ** 0.5 # Penalise less for more king moves
 
+                # Penalise enemy pieces covering squares near the king
+                for square, piece in piece_map.items():
+                    if piece.color != color and square in king_moves:
+                        king_penalty += self.MATERIAL[piece.piece_type] / 3
+
                 return king_penalty
 
             def pawn_structure() -> float:
@@ -757,7 +768,7 @@ class Computer:
 
                     # Reward pawns close and in front of allied king: king distance = 1
                     if chess.square_distance(square, king_square) <= 1:
-                        pawn_score += 1.0
+                        pawn_score += 2.0
 
                 return pawn_score
 
@@ -780,12 +791,13 @@ class Computer:
                 return aggression_score
 
             score = 0            
-            score -= king_safety_penalty() * 4
             score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2 * 25)
-            score += (coverage() ** 1.1 * 0.1) * aggression[color]
-            score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
+            score -= king_safety_penalty() * 4
+
+            score += (coverage() ** 1.1 * 0.15) * aggression[color]
             score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
+            score += (material_score() ** 2 * 25)
+            score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
             score += minor_piece_bonus() * 15 * aggression[color]
             score += pawn_structure() * 15 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += attack_quality() ** 1.2 * aggression[color] * 15
