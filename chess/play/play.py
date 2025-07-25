@@ -5,6 +5,8 @@ import os
 import sys
 import time
 
+from collections import deque
+
 from datetime import datetime
 
 sys.path.insert(0, 'chess')  # Adjust path to import other_bots module
@@ -173,7 +175,11 @@ def main():
 
         time.sleep(2)
 
+
 if __name__ == "__main__":
+    error_timestamps = deque()
+    error_threshold = 10
+
     while True:
         try:
             main()
@@ -181,5 +187,16 @@ if __name__ == "__main__":
             print("\nGame interrupted by user.")
             break
         except Exception as e:
-            print(f"An error occurred: {e.__class__.__name__} {e}")
-            print("Restarting the game...")
+            current_time = time.time()
+            error_timestamps.append(current_time)
+
+            # Remove timestamps older than 60 seconds
+            while error_timestamps and current_time - error_timestamps[0] > 60:
+                error_timestamps.popleft()
+
+            if len(error_timestamps) >= error_threshold:
+                print(f"{len(error_timestamps)} errors occurred within 1 minute. Stopping the program.")
+                break
+            else:
+                print(f"An error occurred: {e.__class__.__name__} {e}")
+                print("Restarting the game...")
