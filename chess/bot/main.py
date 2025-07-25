@@ -1,5 +1,6 @@
 import chess
 import json
+import os
 import random as rnd
 import requests
 import sqlite3
@@ -29,6 +30,8 @@ class Computer:
     ##################################################
 
     TRANSPOSITION_PATH = f"chess/tables/{__version__}_transposition.db"
+    if not os.path.exists(TRANSPOSITION_PATH):
+        os.makedirs(os.path.dirname(TRANSPOSITION_PATH), exist_ok=True)
 
     @classmethod
     def init_db(cls):
@@ -116,7 +119,7 @@ class Computer:
     SYGYZY_URL = "https://tablebase.lichess.ovh/standard?fen="
     OPENING_URL = "https://explorer.lichess.ovh/master?fen="
 
-    OPENING_LEAVE_CHANCE = 0.01  # Initial chance to leave the opening book, increases over time
+    OPENING_LEAVE_CHANCE = 0.025  # Initial chance to leave the opening book, increases over time
 
     def sygyzy_query(self, board: chess.Board) -> dict:
         """
@@ -578,7 +581,7 @@ class Computer:
                 control_bonus = 0
                 for square in piece_map.keys():
                     attacks = board.attacks(square)
-                    control_bonus += len(attacks) ** 0.35 # type: ignore
+                    control_bonus += len(attacks) ** 0.35
 
                     if square not in [chess.E4, chess.E5, chess.D4, chess.D5]:
                         continue
@@ -694,11 +697,11 @@ class Computer:
 
                     # Penalize doubled pawns: more than one pawn on the same file
                     if pawn_files.count(file) > 1:
-                        pawn_score -= 3.0  # Increased penalty
+                        pawn_score -= 1.5
 
                     # Penalize isolated pawns: no friendly pawns on adjacent files
                     if (file - 1 not in pawn_files) and (file + 1 not in pawn_files):
-                        pawn_score -= 3.0  # Increased penalty
+                        pawn_score -= 1.5
 
                     # Penalize backward pawns: pawns that cannot be defended by other pawns and are behind the pawn chain
                     is_backward = False
@@ -715,14 +718,14 @@ class Computer:
                                 if not any(sq in pawns for sq in adj_squares):
                                     is_backward = True
                     if is_backward:
-                        pawn_score -= 2.0
+                        pawn_score -= 1.0
 
                     # Penalize hanging pawns: pawns that are undefended and can be captured easily
                     piece = board.piece_at(square)
                     if piece is not None:
                         defenders = board.attackers(color, square)
                         if len(defenders) == 0:
-                            pawn_score -= 2.5
+                            pawn_score -= 1.5
 
                     # Reward connected pawns: pawns on adjacent files and ranks
                     connected = False
