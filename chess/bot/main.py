@@ -326,13 +326,13 @@ class Computer:
 
         return selected_moves
 
-    def mvv_lva_score(self, board: chess.Board, move: chess.Move) -> int:
+    def mvv_lva_score(self, board: chess.Board, move: chess.Move) -> float:
         """
         Calculate the MVV-LVA (Most Valuable Victim - Least Valuable Attacker) score for a move.
 
         :param board: The current state of the board
         :param move: The move to score
-        :return: An integer score for move ordering
+        :return: A float score for move ordering
         """
         victim = board.piece_at(move.to_square)
         attacker = board.piece_at(move.from_square)
@@ -366,13 +366,13 @@ class Computer:
     HEATMAP_PATH = "chess/global-assets/heatmap.json"
     HEATMAP = json.load(open(HEATMAP_PATH))
 
-    MATERIAL: dict[int, int] = {
-        chess.PAWN: 1,
-        chess.KNIGHT: 3,
-        chess.BISHOP: 3,
-        chess.ROOK: 5,
-        chess.QUEEN: 9,
-        chess.KING: 25
+    MATERIAL: dict[int, float] = {
+        chess.PAWN: 1.25,
+        chess.KNIGHT: 3.0,
+        chess.BISHOP: 3.25,
+        chess.ROOK: 5.0,
+        chess.QUEEN: 9.0,
+        chess.KING: 25.0
     }
 
     def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, original_depth: int = 0, heuristic_sort: bool = True, heuristic_eliminate: bool = True, use_mvv_lva: bool = False) -> float:
@@ -752,6 +752,8 @@ class Computer:
                                 break
                     if is_passed:
                         pawn_score += 2.0
+                        if connected:
+                            pawn_score += 1.0 # Bonus for connected passed pawns
 
                     # Reward pawns close and in front of allied king: king distance = 1
                     if chess.square_distance(square, king_square) <= 1:
@@ -806,7 +808,7 @@ class Computer:
             return score
         
         # Material
-        material = {chess.WHITE: 1, chess.BLACK: 1} # 1 to avoid division by 0
+        material = {chess.WHITE: 0.1, chess.BLACK: 0.1} # 1 to avoid division by 0
         for _, piece in board.piece_map().items():
             if piece.piece_type == chess.KING:
                 continue
