@@ -6,6 +6,7 @@ import requests
 import sqlite3
 import time
 import urllib.parse
+import random
 
 __version__ = '1.1.6'
 
@@ -23,6 +24,9 @@ class Computer:
         # Initialize killer moves dictionary: depth -> list of killer moves
         self.killer_moves: dict[int, list[chess.Move]] = {}
 
+        # Cache for zobrist hash of current board position
+        self.zobrist_cache: dict[str, int] = {}
+
         self.init_db()
 
     ##################################################
@@ -32,6 +36,57 @@ class Computer:
     TRANSPOSITION_PATH = f"chess/tables/{__version__}_transposition.db"
     if not os.path.exists(TRANSPOSITION_PATH):
         os.makedirs(os.path.dirname(TRANSPOSITION_PATH), exist_ok=True)
+
+    ZOBRIST_TABLE = []
+
+    @classmethod
+    def init_zobrist(cls) -> None:
+        if cls.ZOBRIST_TABLE:
+            return
+        # Initialize Zobrist table: 64 squares * 12 piece types (6 types * 2 colors)
+        cls.ZOBRIST_TABLE = [[random.getrandbits(64) for _ in range(64)] for _ in range(12)]
+        # Additional keys for castling rights, en passant, and side to move
+        cls.ZOBRIST_CASTLING = [random.getrandbits(64) for _ in range(16)]
+        cls.ZOBRIST_EN_PASSANT = [random.getrandbits(64) for _ in range(8)]
+        cls.ZOBRIST_SIDE_TO_MOVE = random.getrandbits(64)
+
+    @staticmethod
+    def piece_index(piece: chess.Piece) -> int:
+        # Map piece type and color to index 0-11
+        base = (piece.piece_type - 1)
+        if piece.color == chess.BLACK:
+            base += 6
+        return base
+
+    @classmethod
+    def zobrist_hash(cls, board: chess.Board) -> int:
+        cls.init_zobrist()
+        h = 0
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece is not None:
+                idx = cls.piece_index(piece)
+                h ^= cls.ZOBRIST_TABLE[idx][square]
+        # Castling rights
+        castling_rights = 0
+        if board.has_kingside_castling_rights(chess.WHITE):
+            castling_rights |= 1
+        if board.has_queenside_castling_rights(chess.WHITE):
+            castling_rights |= 2
+        if board.has_kingside_castling_rights(chess.BLACK):
+            castling_rights |= 4
+        if board.has_queenside_castling_rights(chess.BLACK):
+            castling_rights |= 8
+        h ^= cls.ZOBRIST_CASTLING[castling_rights]
+        # En passant
+        ep_square = board.ep_square
+        if ep_square is not None:
+            file = chess.square_file(ep_square)
+            h ^= cls.ZOBRIST_EN_PASSANT[file]
+        # Side to move
+        if board.turn == chess.WHITE:
+            h ^= cls.ZOBRIST_SIDE_TO_MOVE
+        return h
 
     @classmethod
     def init_db(cls):
@@ -72,8 +127,7 @@ class Computer:
             The score of the board position if it exists in the database, otherwise None.
         """
         
-        # TODO: Implement zobrist
-        zobrist_key = board.fen()
+        zobrist_key = str(self.zobrist_hash(board))
         self.cursor.execute("SELECT score FROM transposition_table WHERE zobrist_key = ? AND depth >= ?", (zobrist_key, depth,))
         row = self.cursor.fetchone()
         if row is not None:
@@ -93,8 +147,7 @@ class Computer:
             sqlite3.Error: If there is an error saving the evaluation to the database.
         """
         
-        # TODO: Implement zobrist
-        zobrist_key = board.fen()
+        zobrist_key = str(self.zobrist_hash(board))
         try:
             # Check existing depth for the zobrist_key
             self.cursor.execute("SELECT depth FROM transposition_table WHERE zobrist_key = ?", (zobrist_key,))
@@ -862,8 +915,8 @@ class Computer:
             return any(score == self.BEST_SCORE for _, score in move_score_map)
 
         def get_stored_winning_move(board: chess.Board) -> chess.Move | None:
-            fen = board.fen()
-            self.cursor.execute("SELECT move_uci FROM winning_moves WHERE position_fen = ?", (fen,))
+            zobrist_key = str(self.zobrist_hash(board))
+            self.cursor.execute("SELECT move_uci FROM winning_moves WHERE position_fen = ?", (zobrist_key,))
             row = self.cursor.fetchone()
             if row is not None:
                 try:
@@ -873,10 +926,10 @@ class Computer:
             return None
 
         def save_winning_move(board_before_move: chess.Board, move: chess.Move) -> None:
-            fen = board_before_move.fen()
+            zobrist_key = str(self.zobrist_hash(board_before_move))
             move_uci = move.uci()
             try:
-                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_fen, move_uci) VALUES (?, ?)", (fen, move_uci))
+                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_fen, move_uci) VALUES (?, ?)", (zobrist_key, move_uci))
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
@@ -1014,6 +1067,7 @@ class Computer:
 
             # If there are no moves, return a random one
             if not move_score_dict:
+                print("No moves left, returning random move")
                 return rnd.choice(moves)
 
             # Update move_score_map from the dictionary for next iteration
@@ -1063,7 +1117,7 @@ class Computer:
 
 def main():
 
-    # FEN = "8/1p6/ppp3kP/6P1/1K3P2/4P3/8/8 w - - 0 1"
+    # FEN = "2k5/8/1P4P1/2K5/8/8/BBBBBBBB/8 w - - 0 1"
     FEN = chess.STARTING_FEN
 
     board = chess.Board(FEN)
