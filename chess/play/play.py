@@ -87,8 +87,7 @@ def footer(board: chess.Board, winner: str, winner_name: str):
 | WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
  -------------------------------------------------
 
-{pgn_string}
-"""
+{pgn_string}"""
 
 SESSION = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 
