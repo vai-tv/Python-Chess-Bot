@@ -104,7 +104,7 @@ def main():
     game_count = 0
 
     while True:
-        MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/({game_count + 1})_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
+        MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
 
         if args.log:
             os.makedirs(os.path.dirname(MOVELOG_PATH), exist_ok=True)
@@ -171,6 +171,10 @@ def main():
         print_and_log(footer(board, winner, winner_name))
 
         game_count += 1
+
+        # Add FINISHED to the end of the file log name
+        log_name = f"{MOVELOG_PATH.split('.')[0]}_FINISHED.log"
+        os.rename(MOVELOG_PATH, log_name)
 
         time.sleep(2)
 
