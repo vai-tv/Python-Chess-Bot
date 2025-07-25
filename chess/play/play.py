@@ -105,7 +105,7 @@ def main():
     game_count = 0
 
     while True:
-        MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
+        MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/({game_count + 1})_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
 
         if args.log:
             os.makedirs(os.path.dirname(MOVELOG_PATH), exist_ok=True)
