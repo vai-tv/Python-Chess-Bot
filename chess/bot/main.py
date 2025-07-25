@@ -570,9 +570,11 @@ class Computer:
 
                     # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                     if piece.color != color:
+                        # Attack
                         attack_bonus += self.MATERIAL[piece.piece_type] ** 1.5 * aggression[color]
                     else:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.9 * aggression[not color]
+                        # Defense
+                        attack_bonus += self.MATERIAL[piece.piece_type] * 2.5 ** 0.75 * aggression[not color]
                 
                 return attack_bonus ** 0.5 + cover_bonus
             
@@ -705,18 +707,14 @@ class Computer:
 
                     # Penalize backward pawns: pawns that cannot be defended by other pawns and are behind the pawn chain
                     is_backward = False
-                    if color == chess.WHITE:
-                        for adj_file in [file - 1, file + 1]:
-                            if 0 <= adj_file <= 7:
+                    for adj_file in [file - 1, file + 1]:
+                        if 0 <= adj_file <= 7:
+                            if color == chess.WHITE:
                                 adj_squares = [chess.square(adj_file, r) for r in range(rank)]
-                                if not any(sq in pawns for sq in adj_squares):
-                                    is_backward = True
-                    else:
-                        for adj_file in [file - 1, file + 1]:
-                            if 0 <= adj_file <= 7:
+                            else:
                                 adj_squares = [chess.square(adj_file, r) for r in range(rank + 1, 8)]
-                                if not any(sq in pawns for sq in adj_squares):
-                                    is_backward = True
+                            if not any(sq in pawns for sq in adj_squares):
+                                is_backward = True
                     if is_backward:
                         pawn_score -= 1.0
 
@@ -726,6 +724,8 @@ class Computer:
                         defenders = board.attackers(color, square)
                         if len(defenders) == 0:
                             pawn_score -= 1.5
+                            if is_backward:
+                                pawn_score -= 1.0 # Penalty for hanging pawns that are also backward
 
                     # Reward connected pawns: pawns on adjacent files and ranks
                     connected = False
@@ -751,7 +751,7 @@ class Computer:
                                 is_passed = False
                                 break
                     if is_passed:
-                        pawn_score += 2.0
+                        pawn_score += 2.0 + (rank if color == chess.WHITE else 7 - rank) * 0.1
                         if connected:
                             pawn_score += 1.0 # Bonus for connected passed pawns
 
@@ -768,21 +768,21 @@ class Computer:
                 # Get distance from enemy king for each piece
                 for square, piece in piece_map.items():
                     if piece.color == color:
-                        aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square)) * 5
+                        aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square)) * 7.5
 
                 # Reward / penalise checks
                 if board.is_check():
                     if board.turn == color:
-                        aggression_score -= 1
+                        aggression_score -= 1.5
                     else:
-                        aggression_score += 1
+                        aggression_score += 1.5
 
                 return aggression_score
 
             score = 0            
             score -= king_safety_penalty() * 4
             score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2 * 20)
+            score += (material_score() ** 2 * 25)
             score += (coverage() ** 1.1 * 0.1) * aggression[color]
             score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
             score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
@@ -808,7 +808,7 @@ class Computer:
             return score
         
         # Material
-        material = {chess.WHITE: 0.1, chess.BLACK: 0.1} # 1 to avoid division by 0
+        material = {chess.WHITE: 1.0, chess.BLACK: 1.0} # 1 to avoid division by 0
         for _, piece in board.piece_map().items():
             if piece.piece_type == chess.KING:
                 continue
