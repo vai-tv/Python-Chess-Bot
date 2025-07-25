@@ -6,7 +6,7 @@ import sqlite3
 import time
 import urllib.parse
 
-__version__ = '1.1.6'
+__version__ = '1.6.1'
 
 class Computer:
 
@@ -606,7 +606,7 @@ class Computer:
                         mobility_count = len(attacks)
                         # Weight mobility more heavily, with nonlinear scaling
                         weight = piece_weight.get(piece.piece_type, 1.0)
-                        mobility_score += (mobility_count ** 0.75) * piece_weight * 0.5
+                        mobility_score += (mobility_count ** 0.75) * weight * 0.5
 
                 return base_score + mobility_score
 
@@ -735,7 +735,10 @@ class Computer:
                 # Get distance from enemy king for each piece
                 for square, piece in piece_map.items():
                     if piece.color == color:
-                        aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square)) * 5
+                        dist = chess.square_distance(square, enemy_king_square)
+                        if dist == 0:
+                            dist = 1  # Avoid division by zero
+                        aggression_score += self.MATERIAL[piece.piece_type] / dist * 5
 
                 # Reward / penalise checks
                 if board.is_check():
@@ -744,18 +747,56 @@ class Computer:
                     else:
                         aggression_score += 1
 
+                # Apply pressure to weak or vulnerable pieces (undefended or attacked)
+                for square, piece in piece_map.items():
+                    if piece.color != color:
+                        # Check if piece is attacked by color
+                        attackers = board.attackers(color, square)
+                        defenders = board.attackers(not color, square)
+
+                        if attackers:
+                            if len(defenders) == 0:
+                                aggression_score += self.MATERIAL[piece.piece_type] * len(attackers)
+                            else:
+                                defender = board.piece_at(next(iter(defenders)))
+                                if defender is None:
+                                    continue
+                                defender_value = self.MATERIAL[defender.piece_type]
+                                if self.MATERIAL[piece.piece_type] > defender_value:
+                                    aggression_score += self.MATERIAL[piece.piece_type] * len(attackers)
+
+                # Reward positions with checkmate threats
+                for move in board.legal_moves:
+                    board.push(move)
+                    if board.is_checkmate():
+                        board.pop()
+                        aggression_score += 5.0
+                        break
+                    board.pop()
+
+                # Additional bonus for beneficial trades
+                for move in board.legal_moves:
+                    if board.piece_at(move.to_square) is None:
+                        continue
+                    victim = board.piece_at(move.to_square)
+                    attacker = board.piece_at(move.from_square)
+                    if victim and attacker:
+                        # If trade results in material gain, reward
+                        if self.MATERIAL[victim.piece_type] < self.MATERIAL[attacker.piece_type]:
+                            aggression_score += 1.0
+
                 return aggression_score
 
             score = 0            
             score -= king_safety_penalty() * 5.5
             score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2 * 35)
+            score += (material_score() ** 2 * 40)
             score += (coverage() * 0.1) * aggression[color]
             score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
             score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += minor_piece_bonus() * 15 * aggression[color]
             score += pawn_structure() * 10 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
-            score += attack_quality() ** 1.2 * aggression[color] * 15
+            score += attack_quality() ** 1.2 * aggression[color] * 151
 
             if isinstance(score, complex):
                 print("\nAGG", aggression[color])
@@ -787,7 +828,7 @@ class Computer:
         aggression = {chess.WHITE: 0.0, chess.BLACK: 0.0}
         for color in [chess.WHITE, chess.BLACK]:
             aggression[color] = min(material[color] / (2 * material[not color]), 1.5) ** 2
-            aggression[color] *= 0.5 if stage == 'early' else 1.25 if stage == 'middle' else 1
+            aggression[color] *= 0.5 if stage == 'early' else 1.5 if stage == 'middle' else 1.25
         
         # Player evaluation
         score = 0
