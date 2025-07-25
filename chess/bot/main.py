@@ -986,6 +986,11 @@ class Computer:
                     break
 
                 print(f"{board.san(move)} : {score:.2f}",end='\t',flush=True)
+
+                # Remove moves with worst score
+                if score == self.WORST_SCORE:
+                    move_score_dict.pop(move)
+                    continue
                 
                 move_score_dict[move] = score
 
@@ -1007,11 +1012,15 @@ class Computer:
             
             print()
 
+            # If there are no moves, return a random one
+            if not move_score_dict:
+                return rnd.choice(moves)
+
             # Update move_score_map from the dictionary for next iteration
             move_score_map = list(move_score_dict.items())
 
             # Terminate early if an immediate win is found
-            if _should_terminate(move_score_map) or all(score == self.WORST_SCORE for _, score in move_score_map):
+            if _should_terminate(move_score_map):
                 # Choose best move from current depth
                 best_move = current_best_move if current_best_move is not None else maxmin(move_score_map, key=lambda x: x[1])[0]
 
