@@ -6,7 +6,7 @@ import sqlite3
 import time
 import urllib.parse
 
-__version__ = '1.1.5'
+__version__ = '1.6'
 
 class Computer:
 
@@ -488,17 +488,14 @@ class Computer:
             return cached_score
 
         # Game over
-        if board.is_game_over():
-            # Explicitly check for draw conditions
-            if board.is_checkmate():
-                if board.result() == "1-0":
-                    return float('inf')
-                elif board.result() == "0-1":
-                    return float('-inf')
-            elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.can_claim_threefold_repetition():
+        outcome = board.outcome(claim_draw=True)
+        if outcome is not None:
+            if outcome.winner == chess.WHITE:
+                return float('inf')
+            elif outcome.winner == chess.BLACK:
+                return float('-inf')
+            else:
                 return 0
-            # fallback for other game over conditions
-            return 0
         
         stage = self.get_game_stage(board)
 
@@ -508,6 +505,15 @@ class Computer:
                 PAWNS[piece.color].append(square)
 
         KINGS = {chess.WHITE : board.king(chess.WHITE), chess.BLACK : board.king(chess.BLACK)}
+
+        piece_weight = {
+            chess.PAWN: 0.5,
+            chess.KNIGHT: 1.5,
+            chess.BISHOP: 1.7,
+            chess.ROOK: 1.2,
+            chess.QUEEN: 1.0,
+            chess.KING: 0.3
+        }
 
         def evaluate_player(color: chess.Color) -> float:
 
@@ -532,7 +538,6 @@ class Computer:
                 
                 for square in set(attacked_squares):
                     attack_bonus += attacked_squares.count(square) ** 1.25
-                    attack_bonus **= 0.5
 
                     piece = board.piece_at(square)
                     rank = chess.square_rank(square)
@@ -551,9 +556,15 @@ class Computer:
 
                     # Reward pieces in the enemy half
                     if color == chess.WHITE and rank > 3:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[not color]
+                        attack_bonus += piece_weight[piece.piece_type] * 4 ** 0.6 * aggression[color]
                     elif color == chess.BLACK and rank < 4:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[not color]
+                        attack_bonus += piece_weight[piece.piece_type] * 4 ** 0.6 * aggression[color]
+
+                    # Penalise pieces in the back 2 ranks
+                    if color == chess.WHITE and rank < 2:
+                        attack_bonus -= piece_weight[piece.piece_type] * 3 ** 0.6 * aggression[color]
+                    elif color == chess.BLACK and rank > 5:
+                        attack_bonus -= piece_weight[piece.piece_type] * 3 ** 0.6 * aggression[color]
 
                     # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                     if piece.color != color:
@@ -561,7 +572,7 @@ class Computer:
                     else:
                         attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.9 * aggression[not color]
                     
-                return attack_bonus + cover_bonus
+                return abs(attack_bonus) ** 0.5 * (abs(attack_bonus) / attack_bonus) + cover_bonus
             
             def control() -> float:
                 # Reward pieces per square control
@@ -594,14 +605,7 @@ class Computer:
                         attacks = board.attacks(square)
                         mobility_count = len(attacks)
                         # Weight mobility more heavily, with nonlinear scaling
-                        piece_weight = {
-                            chess.PAWN: 0.5,
-                            chess.KNIGHT: 1.5,
-                            chess.BISHOP: 1.7,
-                            chess.ROOK: 1.2,
-                            chess.QUEEN: 1.0,
-                            chess.KING: 0.3
-                        }.get(piece.piece_type, 1.0)
+                        weight = piece_weight.get(piece.piece_type, 1.0)
                         mobility_score += (mobility_count ** 0.75) * piece_weight * 0.5
 
                 return base_score + mobility_score
@@ -648,7 +652,7 @@ class Computer:
                         chess.BISHOP: [chess.C8, chess.F8]
                     }
                 }
-                for square, piece in board.piece_map().items():
+                for square, piece in piece_map.items():
                     if piece.color == color and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
                         if square not in starting_squares[color][piece.piece_type]:
                             minor_piece_development_bonus += 1.5  # Bonus for developed minor piece
@@ -715,10 +719,12 @@ class Computer:
                                 break
                     if is_passed:
                         pawn_score += 2.0
+                        if connected: # Reward connected passed pawns
+                            pawn_score += 1.0
 
                     # Reward pawns close and in front of allied king: king distance = 1
-                    if chess.square_distance(square, king_square) <= 1:
-                        pawn_score += 1.0
+                    if chess.square_distance(square, king_square) <= 1 and rank > chess.square_rank(king_square):
+                        pawn_score += 1.5
 
                 return pawn_score
 
@@ -741,36 +747,35 @@ class Computer:
                 return aggression_score
 
             score = 0            
-            score -= king_safety_penalty() * 4
+            score -= king_safety_penalty() * 5.5
             score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2 * 20)
-            score += (coverage() ** 1.1 * 0.1) * aggression[color]
+            score += (material_score() ** 2 * 35)
+            score += (coverage() * 0.1) * aggression[color]
             score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
             score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += minor_piece_bonus() * 15 * aggression[color]
             score += pawn_structure() * 10 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += attack_quality() ** 1.2 * aggression[color] * 15
 
-            # print("\nAGG", aggression[color])
-            # print("EAG", aggression[not color])
-            # print("-KSP", king_safety_penalty() * 2)
-            # print("-QPS", queen_penalty_score() / aggression[color])
-            # print("-LLP", low_legal_penalty() ** 1.5 * aggression[not color] ** 2)
-            # print("MS", material_score() ** 2 * 10)
-            # print("ATK", attack() ** 1.5 * 0.1 * aggression[color])
-            # print("HT", heatmap() ** 3 * aggression[not color])
-            # print("CTL", control() ** 1.5 * 0.35 * aggression[color])
-            # print("MPC", minor_piece_bonus() * 10 * aggression[color])
-            # print("PS", pawn_structure() * 10)
-            # print("AQ", attack_quality() * aggression[color] * 20)
-            # print("FINAL",score)
-            # input()
+            if isinstance(score, complex):
+                print("\nAGG", aggression[color])
+                print("EAG", aggression[not color])
+                print("-KSP", king_safety_penalty() * 5.5)
+                print("-LLP", (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2))
+                print("+MS", material_score() ** 2 * 20)
+                print("+COV", coverage() * 0.1 * aggression[color])
+                print("+HEAT", heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5))
+                print("+CTRL", (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1))
+                print("+MIN", minor_piece_bonus() * 15 * aggression[color])
+                print("+PAWN", pawn_structure() * 10 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1))
+                print("+ATT", attack_quality() ** 1.2 * aggression[color] * 15)
+                raise ValueError("Score is complex")
 
             return score
         
         # Material
         material = {chess.WHITE: 1, chess.BLACK: 1} # 1 to avoid division by 0
-        for _, piece in board.piece_map().items():
+        for _, piece in piece_map.items():
             if piece.piece_type == chess.KING:
                 continue
             if piece.color == chess.WHITE:
