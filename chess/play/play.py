@@ -1,6 +1,7 @@
 import argparse
 import chess
 import chess.pgn
+import chess.engine
 import os
 import sys
 import time
@@ -40,6 +41,12 @@ parser.add_argument(
     action='store_true',
     help="Enable logging of the game moves to a file.",
     default=False
+)
+parser.add_argument(
+    '-om', '--opening-moves',
+    type=int,
+    help="Number of opening moves to play before letting the bots play. Advised to be around 10.",
+    default=0
 )
 args = parser.parse_args()
 
@@ -98,7 +105,60 @@ SESSION = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 FEN = chess.STARTING_FEN  # Starting position FEN
 WINS = [0, 0]  # Initialize win counts for players
 
+def play_opening_moves(board: chess.Board) -> chess.Board:
+    """Play the opening moves of the game by the logic of the white computer."""
+
+    if args.opening_moves == 0:
+        return board
+
+    while True:
+        
+        board_copy = board.copy()
+
+        for i in range(args.opening_moves * 2):
+            
+            move = players[0](board_copy.turn).random_opening_move(board_copy)
+            while move is None:
+                move = players[0](board_copy.turn).random_opening_move(board_copy)
+            print(f"Move {(i + 2) // 2}: {board_copy.san(move)}",end='\t')
+            board_copy.push(move)
+
+        # Only continue if the position is close to equal in score (0 ± 10)
+        engine = chess.engine.SimpleEngine.popen_uci("stockfish")
+        evaluation = engine.analyse(board_copy, chess.engine.Limit(time=1))
+        engine.quit()
+
+        score = evaluation["score"].white().score() # type: ignore
+        if score is None:
+            continue
+        if abs(score) < 10:
+            print(f"\nPosition is close to equal, score is {score}. Continuing.")
+            return board_copy
+        
+        print(f"\nPosition is not close to equal, score is {score}.")
+
 def main():
+    """
+    Main function to play multiple games of chess with the given players.
+
+    This function will play multiple games of chess, alternating the colors of the players
+    each game. The FEN of the starting position is used for each game. The games are logged
+    to a file if specified with the --log flag.
+
+    The wins of each player are tracked and displayed after each game. The games are numbered
+    from 1 to the number of games specified.
+
+    The function will loop indefinitely until the user stops it.
+
+    :return: None
+    """
+
+    def print_and_log(*print_args, **kwargs):
+        """Prints to console and logs to file."""
+        print(*print_args, **kwargs)
+        if args.log:
+            print(*print_args, file=MOVELOG_FILE, **kwargs)
+
     global players, game_count
     original_players = players.copy()
     game_count = 0
@@ -114,12 +174,6 @@ def main():
 
         print(f"Game log will be saved to: {MOVELOG_PATH}")
 
-        def print_and_log(*print_args, **kwargs):
-            """Prints to console and logs to file."""
-            print(*print_args, **kwargs)
-            if args.log:
-                print(*print_args, file=MOVELOG_FILE, **kwargs)
-
         # Assign players for this game based on game count to swap colors
         if game_count % 2 == 0:
             players = original_players
@@ -127,6 +181,7 @@ def main():
             players = original_players[::-1]
 
         board = chess.Board(fen=FEN)
+        board = play_opening_moves(board)
 
         print_and_log(header())
 
@@ -198,8 +253,11 @@ if __name__ == "__main__":
                 error_timestamps.popleft()
 
             if len(error_timestamps) >= error_threshold:
-                print(f"{len(error_timestamps)} errors occurred within 1 minute. Stopping the program.")
-                break
+                print(f"{len(error_timestamps)} errors occurred within 1 minute. Pausing and rebooting.")
+                time.sleep(60)
+                # Rerun the file
+                os.execv(sys.executable, [sys.executable] + sys.argv)
             else:
                 print(f"An error occurred: {e.__class__.__name__} {e}")
-                print("Restarting the game...")
+                print("Restarting the game in three seconds...")
+                time.sleep(3)
