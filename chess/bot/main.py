@@ -186,6 +186,9 @@ class Computer:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 return response.json()
+            elif response.status_code == 429:
+                time.sleep(5)
+                return self.opening_query(board)
             else:
                 raise requests.RequestException(f"Request to opening book server failed with status code {response.status_code}")
 
@@ -397,6 +400,7 @@ class Computer:
                 print(f"Error saving winning move to DB: {e}")
 
         if depth == 0 or board.is_game_over() or self.is_timeup():
+            self.nodes_evaluated += 1
             return self.evaluate(board)
 
         is_maximizing = board.turn == chess.WHITE
@@ -407,11 +411,12 @@ class Computer:
 
         # Null Move Pruning (NMP)
         R = 2  # Reduction for null move pruning
-        if depth > 2 and not board.is_check():
+        if search_depth > 2 and not board.is_check():
             board.push(chess.Move.null())
             null_score = -self.minimax(board, depth - 1 - R, -beta, -beta + 1, original_depth=original_depth, heuristic_sort=heuristic_sort, heuristic_eliminate=heuristic_eliminate, use_mvv_lva=use_mvv_lva)
             board.pop()
             if null_score >= beta:
+                self.beta_cutoffs += 1
                 return null_score
 
         # Move ordering with Killer Move Heuristics (KMH) and MVV-LVA prioritization
@@ -427,6 +432,10 @@ class Computer:
         # Order other moves with MVV-LVA if enabled
         if use_mvv_lva:
             other_moves = self.mvv_lva_ordering(board, other_moves)
+        elif heuristic_sort:
+            other_moves = self.weak_heuristic_moves(board, 0)
+        elif heuristic_eliminate:
+            other_moves = self.select_wh_moves(board, 0)
 
         # Combine killer moves first, then other moves
         ordered_moves = killer_moves_in_legals + other_moves
@@ -436,29 +445,42 @@ class Computer:
             score = self.minimax(board, depth - 1, alpha, beta, heuristic_sort=heuristic_sort, original_depth=original_depth, heuristic_eliminate=heuristic_eliminate, use_mvv_lva=use_mvv_lva)
             board.pop()
 
+            self.nodes_evaluated += 1
+
             if is_maximizing:
                 if score > best_score:
                     best_score = score
                     best_move = move
                 alpha = max(alpha, best_score)
+                # Early return if alpha is already greater or equal to beta
+                if alpha >= beta:
+                    self.alpha_cutoffs += 1
+                    # Update killer moves on beta cutoff with non-capturing moves
+                    if not board.is_capture(move):
+                        if search_depth not in self.killer_moves:
+                            self.killer_moves[search_depth] = []
+                        if move not in self.killer_moves[search_depth]:
+                            self.killer_moves[search_depth].append(move)
+                            if len(self.killer_moves[search_depth]) > 2:
+                                self.killer_moves[search_depth].pop(0)
+                    return best_score
             else:
                 if score < best_score:
                     best_score = score
                     best_move = move
                 beta = min(beta, best_score)
-
-            # Update killer moves on beta cutoff with non-capturing moves
-            if beta <= alpha:
-                if not board.is_capture(move):
-                    # Add move to killer moves for this depth if not already present
-                    if search_depth not in self.killer_moves:
-                        self.killer_moves[search_depth] = []
-                    if move not in self.killer_moves[search_depth]:
-                        self.killer_moves[search_depth].append(move)
-                        # Limit to 2 killer moves per depth
-                        if len(self.killer_moves[search_depth]) > 2:
-                            self.killer_moves[search_depth].pop(0)
-                break
+                # Early return if beta is already less or equal to alpha
+                if beta <= alpha:
+                    self.beta_cutoffs += 1
+                    # Update killer moves on beta cutoff with non-capturing moves
+                    if not board.is_capture(move):
+                        if search_depth not in self.killer_moves:
+                            self.killer_moves[search_depth] = []
+                        if move not in self.killer_moves[search_depth]:
+                            self.killer_moves[search_depth].append(move)
+                            if len(self.killer_moves[search_depth]) > 2:
+                                self.killer_moves[search_depth].pop(0)
+                    return best_score
 
         # If this position leads to a winning score, save the winning move
         if ((is_maximizing and best_score == float('inf')) or (not is_maximizing and best_score == float('-inf'))) and best_move is not None:
@@ -927,35 +949,46 @@ class Computer:
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
 
+        def immediate_move() -> chess.Move | None:
+            # First try a random opening move
+            opening_best = self.random_opening_move(board)
+            if opening_best is not None:
+                print("Using random opening move")
+                self.conn.close()
+                return opening_best
+
+            # Get Sygyzy best move
+            syg_best = self.best_sygyzy(board)
+            if syg_best is not None:
+                print("Using Sygzy best move")
+                self.conn.close()
+                return syg_best
+
+
+            # Check if there is a stored winning move for the current position
+            stored_move = get_stored_winning_move(board)
+            if stored_move is not None and stored_move in board.legal_moves:
+                print("Using stored winning move")
+                self.conn.close()
+                return stored_move
+            
         self.conn = sqlite3.connect(self.TRANSPOSITION_PATH)
         self.cursor = self.conn.cursor()
+
+        move = immediate_move()
+        if move is not None:
+            return move
+        
+        ####################################################################################################
+
+        self.nodes_evaluated = 0
+        self.alpha_cutoffs = 0
+        self.beta_cutoffs = 0
 
         print(f"{"white" if board.turn == chess.WHITE else "black"} move")
 
         self.start_time = time.time()
         self.timeout = timeout
-
-        # First try a random opening move
-        opening_best = self.random_opening_move(board)
-        if opening_best is not None:
-            print("Using random opening move")
-            self.conn.close()
-            return opening_best
-
-        # Get Sygyzy best move
-        syg_best = self.best_sygyzy(board)
-        if syg_best is not None:
-            print("Using Sygzy best move")
-            self.conn.close()
-            return syg_best
-
-
-        # Check if there is a stored winning move for the current position
-        stored_move = get_stored_winning_move(board)
-        if stored_move is not None and stored_move in board.legal_moves:
-            print("Using stored winning move")
-            self.conn.close()
-            return stored_move
 
         depth = 1
         best_move = None
@@ -976,7 +1009,7 @@ class Computer:
 
             # Gradually filter out based on the previous scores
             if depth > 1:
-                turning_point = self._turning_point([score for _, score in move_score_map], threshold=0.5 if depth == 2 else 0.1)
+                turning_point = self._turning_point([score for _, score in move_score_map], threshold=0.15)
                 move_score_map = move_score_map[:turning_point]
                 moves = moves[:turning_point]
             print(len(moves),"moves to look at:",[board.san(m) for m in moves])
@@ -1083,6 +1116,10 @@ class Computer:
                 self.conn.commit()
 
         self.conn.close()
+
+        print(f"Nodes evaluated: {self.nodes_evaluated} | NPS: {self.nodes_evaluated / (self.timeout)}")
+        print(f"Alpha cutoffs: {self.alpha_cutoffs}")
+        print(f"Beta cutoffs: {self.beta_cutoffs}")
 
         return best_move
 
