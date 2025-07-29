@@ -1059,7 +1059,7 @@ class Computer:
 
             if not move_score_dict:
                 print("No moves left, returning random move")
-                return rnd.choice(moves)
+                return rnd.choice(list(board.legal_moves))
 
             # Update move_score_map from the dictionary for next iteration
             move_score_map = list(move_score_dict.items())
