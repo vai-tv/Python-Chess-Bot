@@ -186,6 +186,9 @@ class Computer:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 return response.json()
+            elif response.status_code == 429:
+                time.sleep(5)
+                return self.opening_query(board)
             else:
                 raise requests.RequestException(f"Request to opening book server failed with status code {response.status_code}")
 
