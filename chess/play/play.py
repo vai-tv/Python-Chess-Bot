@@ -118,8 +118,15 @@ def play_opening_moves(board: chess.Board) -> chess.Board:
         for i in range(args.opening_moves * 2):
             
             move = players[0](board_copy.turn).random_opening_move(board_copy)
-            while move is None:
+            start = time.time()
+
+            while move is None and time.time() - start > 10:
+                start = time.time()
                 move = players[0](board_copy.turn).random_opening_move(board_copy)
+                
+            if move is None:
+                print("No more theory.")
+                break
             print(f"Move {(i + 2) // 2}: {board_copy.san(move)}",end='\t')
             board_copy.push(move)
 
