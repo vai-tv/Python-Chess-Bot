@@ -120,8 +120,9 @@ def play_opening_moves(board: chess.Board) -> chess.Board:
             move = players[0](board_copy.turn).random_opening_move(board_copy)
             start = time.time()
 
-            while move is None and time.time() - start > 10:
-                start = time.time()
+            while move is None:
+                if time.time() - start > 10:
+                    break
                 move = players[0](board_copy.turn).random_opening_move(board_copy)
                 
             if move is None:
