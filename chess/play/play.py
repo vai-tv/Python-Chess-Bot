@@ -131,7 +131,7 @@ def play_opening_moves(board: chess.Board) -> chess.Board:
             print(f"Move {(i + 2) // 2}: {board_copy.san(move)}",end='\t')
             board_copy.push(move)
 
-        # Only continue if the position is close to equal in score (0 ± 10)
+        # Only continue if the position is close to equal in score (0 ± 20)
         engine = chess.engine.SimpleEngine.popen_uci("stockfish")
         evaluation = engine.analyse(board_copy, chess.engine.Limit(time=1))
         engine.quit()
@@ -139,7 +139,7 @@ def play_opening_moves(board: chess.Board) -> chess.Board:
         score = evaluation["score"].white().score() # type: ignore
         if score is None:
             continue
-        if abs(score) < 10:
+        if abs(score) < 20:
             print(f"\nPosition is close to equal, score is {score}. Continuing.")
             return board_copy
         
