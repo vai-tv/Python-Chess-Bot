@@ -414,7 +414,7 @@ class Computer:
             fen = board_before_move.fen()
             move_uci = move.uci()
             try:
-                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_fen, move_uci) VALUES (?, ?)", (fen, move_uci))
+                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_zobrist, move_uci) VALUES (?, ?)", (fen, move_uci))
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
