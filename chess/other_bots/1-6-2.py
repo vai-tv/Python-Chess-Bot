@@ -45,14 +45,14 @@ class Computer:
         cls.cursor = cls.conn.cursor()
         cls.cursor.execute("""
             CREATE TABLE IF NOT EXISTS transposition_table (
-                zobrist_key INTEGER PRIMARY KEY,
+                zobrist_key TEXT PRIMARY KEY,
                 score REAL,
                 depth INTEGER
             )
         """)
         cls.cursor.execute("""
             CREATE TABLE IF NOT EXISTS winning_moves (
-                position_zobrist INTEGER PRIMARY KEY,
+                position_zobrist TEXT PRIMARY KEY,
                 move_uci TEXT
             )
         """)
@@ -70,7 +70,7 @@ class Computer:
             The score of the board position if it exists in the database, otherwise None.
         """
         
-        zobrist_key = chess.polyglot.zobrist_hash(board)
+        zobrist_key = str(chess.polyglot.zobrist_hash(board))
         self.cursor.execute("SELECT score FROM transposition_table WHERE zobrist_key = ? AND depth >= ?", (zobrist_key, depth,))
         row = self.cursor.fetchone()
         if row is not None:
@@ -90,7 +90,7 @@ class Computer:
             sqlite3.Error: If there is an error saving the evaluation to the database.
         """
         
-        zobrist_key = chess.polyglot.zobrist_hash(board)
+        zobrist_key = str(chess.polyglot.zobrist_hash(board))
         try:
             # Check existing depth for the zobrist_key
             self.cursor.execute("SELECT depth FROM transposition_table WHERE zobrist_key = ?", (zobrist_key,))
@@ -109,7 +109,7 @@ class Computer:
             print(f"Error saving evaluation to DB: {e}")
 
     def get_stored_winning_move(self, board: chess.Board) -> chess.Move | None:
-        zobrist_key = chess.polyglot.zobrist_hash(board)
+        zobrist_key = str(chess.polyglot.zobrist_hash(board))
         self.cursor.execute("SELECT move_uci FROM winning_moves WHERE position_zobrist = ?", (zobrist_key,))
         row = self.cursor.fetchone()
         if row is not None:
@@ -120,7 +120,7 @@ class Computer:
         return None
 
     def save_winning_move(self, board_before_move: chess.Board, move: chess.Move) -> None:
-        zobrist_key = chess.polyglot.zobrist_hash(board_before_move)
+        zobrist_key = str(chess.polyglot.zobrist_hash(board_before_move))
         move_uci = move.uci()
         try:
             self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_zobrist, move_uci) VALUES (?, ?)", (zobrist_key, move_uci))
