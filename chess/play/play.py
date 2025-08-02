@@ -268,4 +268,8 @@ if __name__ == "__main__":
             else:
                 print(f"An error occurred: {e.__class__.__name__} {e}")
                 print("Restarting the game in three seconds...")
+
+                with open(f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/error.log", "a") as f:
+                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
+
                 time.sleep(3)
