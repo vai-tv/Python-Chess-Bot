@@ -145,6 +145,9 @@ def play_opening_moves(board: chess.Board) -> chess.Board:
         
         print(f"\nPosition is not close to equal, score is {score}.")
 
+global game_count
+game_count = 0
+
 def main():
     """
     Main function to play multiple games of chess with the given players.
@@ -169,7 +172,6 @@ def main():
 
     global players, game_count
     original_players = players.copy()
-    game_count = 0
 
     while True:
         MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
