@@ -102,11 +102,21 @@ SESSION = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 #                                             MAIN LOOP                                            #
 ####################################################################################################
 
+global FEN
 FEN = chess.STARTING_FEN  # Starting position FEN
-WINS = [0, 0]  # Initialize win counts for players
+# FEN = "r1bq1rk1/pp1n1ppp/2pbpn2/3p4/2PP4/2N1PN2/PP2BPPP/R1BQ1RK1 w - - 0 9" # Sharp middlegame, helpful for testing attack potential
+# FEN = "8/8/p1pr1k1p/3p1p1p/1P1P1P1P/2P5/5K2/6R1 w - - 0 1" # Rook and pawn endgame where white has a positional advantage, helpful for testing conversion into a win and using pieces well
+# FEN = "8/6p1/1pb2k1p/4p3/1Bn1P3/5N2/PP4PP/6K1 w - - 0 1" # Quiet middlegame into endgame, white has a slight edge
+WINS = [0.0, 0.0]  # Initialize win counts for players
 
 def play_opening_moves(board: chess.Board) -> chess.Board:
     """Play the opening moves of the game by the logic of the white computer."""
+
+    if not hasattr(players[0], 'random_opening_move'):
+        return board
+
+    global FEN
+    FEN = ""
 
     if args.opening_moves == 0:
         return board
@@ -141,7 +151,8 @@ def play_opening_moves(board: chess.Board) -> chess.Board:
             continue
         if abs(score) < 20:
             print(f"\nPosition is close to equal, score is {score}. Continuing.")
-            return board_copy
+            FEN = board_copy.fen()
+            return chess.Board(fen=FEN) # Return the FEN of the new board so the opening is not counted in accuracy
         
         print(f"\nPosition is not close to equal, score is {score}.")
 
@@ -232,6 +243,9 @@ def main():
             else:
                 WINS[1 - win_index] += 1
                 winner_name = args.players[1 - win_index].upper()
+        elif board.result() == '1/2-1/2':
+            WINS[0] += 0.5
+            WINS[1] += 0.5
 
         print_and_log(footer(board, winner, winner_name))
 
