@@ -403,7 +403,7 @@ class Computer:
             "B": [[-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0], [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], [-1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0], [-1.0, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -1.0], [-1.0, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -1.0], [-1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0], [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]],
             "R": [[-0.5, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -0.5], [1.0, 1.5, 2.0, 2.5, 2.5, 2.0, 1.5, 1.0], [-0.5, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -0.5], [-0.5, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -0.5], [-0.5, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -0.5], [-0.5, 0.0, 1.0, 1.25, 1.25, 1.0, 0.0, -0.5], [-0.5, 0.0, 0.75, 1.0, 1.0, 0.75, 0.0, -0.5], [-1.0, -0.5, 0.5, 0.75, 0.75, 0.5, -0.5, -1.0]],
             "Q": [[-2.0, -1.5, -1.0, -1.0, -1.0, -1.0, -1.5, -2.0], [-1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.5], [-1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0], [-1.0, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -1.0], [-1.0, 0.0, 1.0, 1.5, 1.5, 1.0, 0.0, -1.0], [-1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0], [-1.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, -1.5], [-2.0, -1.5, -1.0, -1.0, -1.0, -1.0, -1.5, -2.0]],
-            "K": [[-2.0, -1.5, -1.0, -1.0, -1.0, -1.0, -1.5, -2.0], [-1.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -1.5], [-1.0, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, -1.0], [-1.0, -0.5, 0.5, 1.5, 1.5, 0.5, -0.5, -1.0], [-1.0, -0.5, 0.5, 1.5, 1.5, 0.5, -0.5, -1.0], [-1.0, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, -1.0], [-1.5, -1.25, -1.0, -0.75, -0.75, -1.0, -1.25, -1.5], [-2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0]]
+            "K": [[-2.0, -1.5, -1.0, -1.0, -1.0, -1.0, -1.5, -2.0], [-1.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -1.5], [-1.0, -0.5, 1.5, 1.5, 1.5, 1.5, -0.5, -1.0], [-1.0, -0.5, 1.5, 2.5, 2.5, 1.5, -0.5, -1.0], [-1.0, -0.5, 1.5, 2.5, 2.5, 1.5, -0.5, -1.0], [-1.0, -0.5, 1.5, 1.5, 1.5, 1.5, -0.5, -1.0], [-1.5, -1.25, -1.0, -0.75, -0.75, -1.0, -1.25, -1.5], [-2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0]]
         }
     }
 
@@ -442,16 +442,17 @@ class Computer:
 
         self.nodes_explored += 1
 
-        def save_winning_move_local(board_before_move: chess.Board, move: chess.Move) -> None:
-            fen = board_before_move.fen()
-            move_uci = move.uci()
-            try:
-                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_zobrist, move_uci) VALUES (?, ?)", (fen, move_uci))
-                self.conn.commit()
-            except sqlite3.Error as e:
-                print(f"Error saving winning move to DB: {e}")
+        # Instant game over checks
+        if board.is_checkmate():
+            # If checkmate, winner is the opponent of the current turn
+            if board.turn == chess.WHITE:
+                return float('-inf')
+            else:
+                return float('inf')
+        elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw():
+            return 0
 
-        if depth == 0 or board.is_game_over(claim_draw=True) or self.is_timeup():
+        if depth == 0 or self.is_timeup():
             self.leaf_nodes_explored += 1
             return self.evaluate(board)
 
@@ -523,7 +524,7 @@ class Computer:
 
         # If this position leads to a winning score, save the winning move
         if ((is_maximizing and best_score == float('inf')) or (not is_maximizing and best_score == float('-inf'))) and best_move is not None:
-            save_winning_move_local(board, best_move)
+            self.save_winning_move(board, best_move)
 
         return best_score
 
@@ -546,21 +547,17 @@ class Computer:
 
         # Cache piece map once
         piece_map = board.piece_map()
+        PIECES = {
+            chess.WHITE : {s : p for s, p in piece_map.items() if p.color == chess.WHITE},
+            chess.BLACK : {s : p for s, p in piece_map.items() if p.color == chess.BLACK}
+        }
 
         # Try to get score from DB cache
         cached_score = self.evaluate_from_db(board)
         if cached_score is not None:
             return cached_score
 
-        # Game over check
-        outcome = board.outcome(claim_draw=True)
-        if outcome is not None:
-            if outcome.winner == chess.WHITE:
-                return float('inf')
-            elif outcome.winner == chess.BLACK:
-                return float('-inf')
-            else:
-                return 0
+        # (Moved game over check to minimax to avoid repeated calls)
 
         stage = self.get_game_stage(board)
 
@@ -587,7 +584,7 @@ class Computer:
 
         # Precompute material and aggression once
         material = {chess.WHITE: 1, chess.BLACK: 1}  # Avoid division by zero
-        for _, piece in piece_map.items():
+        for piece in piece_map.values():
             if piece.piece_type == chess.KING:
                 continue
             material[piece.color] += self.MATERIAL[piece.piece_type]
@@ -604,7 +601,7 @@ class Computer:
                 return 0
 
             # Cache attacked squares and attacks per piece to avoid repeated calls
-            attacks_cache = {square: board.attacks(square) for square, piece in piece_map.items() if piece.color == color}
+            attacks_cache = {square: board.attacks(square) for square in PIECES[color].keys()}
             attacked_squares = [sq for attacks in attacks_cache.values() for sq in attacks]
             attacked_squares_set = set(attacked_squares)
 
@@ -642,21 +639,21 @@ class Computer:
 
                     # Reward pieces in the enemy half
                     if color == chess.WHITE and rank > 3:
-                        attack_bonus += piece_weight[piece.piece_type] * 4 ** 0.6 * aggression[color]
+                        attack_bonus += piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (7 if stage == 'late' else 4)
                     elif color == chess.BLACK and rank < 4:
-                        attack_bonus += piece_weight[piece.piece_type] * 4 ** 0.6 * aggression[color]
+                        attack_bonus += piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (7 if stage == 'late' else 4)
 
                     # Penalise pieces in the back 2 ranks
                     if color == chess.WHITE and rank < 2:
-                        attack_bonus -= piece_weight[piece.piece_type] * 3 ** 0.6 * aggression[color]
+                        attack_bonus -= piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (6 if stage == 'late' else 3)
                     elif color == chess.BLACK and rank > 5:
-                        attack_bonus -= piece_weight[piece.piece_type] * 3 ** 0.6 * aggression[color]
+                        attack_bonus -= piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (6 if stage == 'late' else 3)
 
                     # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                     if piece.color != color:
                         attack_bonus += self.MATERIAL[piece.piece_type] ** 1.5 * aggression[color]
                     else:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.9 * aggression[not color]
+                        attack_bonus += self.MATERIAL[piece.piece_type] ** 0.9 * 2 * aggression[not color]
 
                 return abs(attack_bonus) ** 0.5 * (abs(attack_bonus) / attack_bonus) + cover_bonus
 
@@ -668,7 +665,7 @@ class Computer:
                     if square not in [chess.E4, chess.E5, chess.D4, chess.D5]:
                         continue
                     piece = piece_map.get(square)
-                    if piece is None or piece.color != color:
+                    if piece is None:
                         continue
                     control_bonus += self.MATERIAL[piece.piece_type]
                     if piece.piece_type == chess.PAWN:
@@ -682,19 +679,16 @@ class Computer:
                 base_score = material[color]
 
                 mobility_score = 0
-                for square, piece in piece_map.items():
-                    if piece.color == color:
-                        mobility_count = len(attacks_cache.get(square, []))
-                        weight = piece_weight.get(piece.piece_type, 1.0)
-                        mobility_score += (mobility_count ** 0.75) * weight * 0.5
+                for square, piece in PIECES[color].items():
+                    mobility_count = len(attacks_cache.get(square, []))
+                    weight = piece_weight.get(piece.piece_type, 1.0)
+                    mobility_score += (mobility_count ** 0.75) * weight * 0.5
 
                 return base_score + mobility_score
 
             def heatmap() -> float:
                 heatmap_score = 0
-                for square, piece in piece_map.items():
-                    if piece.color != color:
-                        continue
+                for square, piece in PIECES[color].items():
                     piece_symbol = piece.symbol().upper()
 
                     rank = chess.square_rank(square)
@@ -728,8 +722,8 @@ class Computer:
                         chess.BISHOP: [chess.C8, chess.F8]
                     }
                 }
-                for square, piece in piece_map.items():
-                    if piece.color == color and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
+                for square, piece in PIECES[color].items():
+                    if piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
                         if square not in starting_squares[color][piece.piece_type]:
                             minor_piece_development_bonus += 1.5
 
@@ -773,6 +767,7 @@ class Computer:
                     if bin(file_bb).count('1') > 1:
                         pawn_score -= 1.5
 
+                # Isolated pawns
                 for file in range(8):
                     if pawn_files_bb[file]:
                         left = pawn_files_bb[file - 1] if file > 0 else 0
@@ -780,6 +775,7 @@ class Computer:
                         if not (left or right):
                             pawn_score -= 1.5
 
+                # Connected pawns
                 if color == chess.WHITE:
                     connected = ((pawns_bb << 7) | (pawns_bb << 9)) & pawns_bb
                 else:
@@ -787,6 +783,7 @@ class Computer:
                 if connected:
                     pawn_score += 1.0
 
+                # Passed pawns
                 for square in chess.SquareSet(pawns_bb):
                     file = chess.square_file(square)
                     rank = chess.square_rank(square)
@@ -816,10 +813,12 @@ class Computer:
                         for f in range(max(0, file-1), min(7, file+1)+1):
                             front_mask |= chess.BB_FILES[f]
                         front_mask &= front_span
+
+                        # Reward passed pawns
                         if enemy_pawns_bb & front_mask == 0:
-                            pawn_score += 2.0
+                            pawn_score += (3.0 if stage == 'late' else 2.0)
                             if connected & (1 << square):
-                                pawn_score += 1.0
+                                pawn_score += (2.0 if stage == 'late' else 1.0)
 
                 if king_square is not None:
                     for square in chess.SquareSet(pawns_bb):
@@ -835,11 +834,7 @@ class Computer:
                 
                 material_diff = material[color] - material[not color]
 
-                # Cache piece squares by color to avoid repeated iteration
-                pieces_of_color = [(sq, p) for sq, p in piece_map.items() if p.color == color]
-                opponent_pieces = [(sq, p) for sq, p in piece_map.items() if p.color != color]
-
-                for square, piece in pieces_of_color:
+                for square, piece in PIECES[color].items():
                     dist = chess.square_distance(square, enemy_king_square)
                     if dist == 0:
                         dist = 1
@@ -886,7 +881,7 @@ class Computer:
                     elif material_diff + victim_material - attacker_material < 0.75:
                         aggression_score -= 3.0
 
-                for square, piece in opponent_pieces:
+                for square, piece in PIECES[not color].items():
                     attackers = board.attackers(color, square)
                     defenders = board.attackers(not color, square)
 
@@ -906,15 +901,15 @@ class Computer:
                 return aggression_score
 
             score = 0
-            score -= king_safety_penalty() * 5.5
+            score -= king_safety_penalty() * 5.5 * (0.1 if stage == 'late' else 1)
             score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2.5 * 25)
-            score += (coverage() * 0.1) * aggression[color]
-            score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
-            score += (control() ** 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
+            score += material_score() ** 2.5 * (50 if stage == 'late' else 25)
+            score += coverage() * aggression[color] * (0.3 if stage == 'late' else 0.1)
+            score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * (30 if stage == 'late' else 22.5 if stage == 'early' else 15)
+            score += (control() ** 1.25) * aggression[color] * (0.8 if stage == 'late' else 0.525 if stage == 'early' else 0.35)
             score += minor_piece_bonus() * 15 * aggression[color]
-            score += cse(pawn_structure(), 1.4) * 2.5 * (2 if stage == 'late' else 1.5)
-            score += attack_quality() ** 1.2 * aggression[color] * 15
+            score += cse(pawn_structure(), 1.4) * (7.5 if stage == 'late' else 3.75)
+            score += attack_quality() ** 1.2 * aggression[color] * (3.75 if stage == 'late' else 15)
 
             if isinstance(score, complex):
                 print("\nAGG", aggression[color])
@@ -1040,10 +1035,10 @@ class Computer:
 
             # Gradually filter out based on the previous scores
             if depth > 1:
-                turning_point = self._turning_point([score for _, score in move_score_map], threshold=0.5 if depth == 2 else 0.2)
+                turning_point = self._turning_point([score for _, score in move_score_map], threshold=0.5 if depth == 2 else 0.2 if self.get_game_stage(board) != 'late' else 0.35) # Encourage longer thinking in endgames
                 move_score_map = move_score_map[:turning_point]
                 moves = moves[:turning_point]
-            print(len(moves),"moves to look at:",[board.san(m) for m in moves])
+            print(len(moves),"moves:",[board.san(m) for m in moves])
 
             # If only one move left, return it
             if len(moves) == 1:
@@ -1207,7 +1202,7 @@ def profile_evaluation() -> None:
 
     print("Warming up the interpreter...")
     for _ in range(int(3e4)):
-        _ = 12345 ** 1234
+        _ = 12345 ** 2345
     print("Interpreter warmed up.")
 
     def evaluate_boards() -> None:
@@ -1218,7 +1213,6 @@ def profile_evaluation() -> None:
 
 def main():
 
-    # FEN = "8/1p6/ppp3kP/6P1/1K3P2/4P3/8/8 w - - 0 1"
     FEN = chess.STARTING_FEN
 
     board = chess.Board(FEN)
@@ -1236,5 +1230,7 @@ def main():
     print("GAME OVER!")
 
 if __name__ == "__main__":
-    # main()
-    profile_evaluation()
+    main()
+    # import cProfile
+    # cProfile.run('main()',sort='cumulative')
+    # profile_evaluation()
