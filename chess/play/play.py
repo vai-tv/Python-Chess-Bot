@@ -216,7 +216,7 @@ class GameLoop:
                 self.game_state.board = chess.Board(fen)
                 
             if move_log_file is not None:
-                print(f"Game log will be saved to: chess/play/logs/{self.session}_{self.players[0].upper()}_{self.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
+                print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
                 
             self.move_logger.print_and_log(
                 self.move_logger.header(game_count, self.game_state.wins, self.players, self.timeout)
@@ -352,13 +352,16 @@ class ChessGameManager:
             session = game_loop.session
             players = self.args.players
             
-            error_dir = f"chess/play/logs/{session}_{players[0].upper()}_{players[1].upper()}"
+            error_dir = f"chess/play/logs/{session}"
             os.makedirs(error_dir, exist_ok=True)
             
             with open(f"{error_dir}/error.log", "a") as f:
                 f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
             
-            raise e
+            print(f"Game interrupted by error: {e}")
+            print(f"Error logs saved to: {error_dir}")
+            
+            time.sleep(5)
 
 
 if __name__ == "__main__":
