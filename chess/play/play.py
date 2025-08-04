@@ -160,20 +160,22 @@ class GameLoop:
         self.timeout = timeout
         self.log_enabled = log_enabled
         self.players = players
-        self.session = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+        self.session = f"{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{players[0].upper()}_{players[1].upper()}"
+        self.TIME_AT_START = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
     def setup_logging(self, game_count: int):
         if not self.log_enabled:
             return None
-            
-        move_log_path = f"chess/play/logs/{self.session}_{self.players[0].upper()}_{self.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
+        
+        self.TIME_AT_START = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
         os.makedirs(os.path.dirname(move_log_path), exist_ok=True)
         return open(move_log_path, 'w')
         
     def cleanup_logging(self, move_log_file, game_count: int):
         if move_log_file is not None and move_log_file != sys.stdout:
             move_log_file.close()
-            move_log_path = f"chess/play/logs/{self.session}_{self.players[0].upper()}_{self.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
+            move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
             log_name = f"{move_log_path.split('.')[0]}_FINISHED.log"
             os.rename(move_log_path, log_name)
             
@@ -340,40 +342,25 @@ class ChessGameManager:
             players=self.args.players
         )
         
-        game_loop.run()
+        try:
+            game_loop.run()
+        except KeyboardInterrupt:
+            print("\nGame interrupted by user.")
+            sys.exit(0)
+        except Exception as e:
+            # Log error using GameLoop's session
+            session = game_loop.session
+            players = self.args.players
+            
+            error_dir = f"chess/play/logs/{session}_{players[0].upper()}_{players[1].upper()}"
+            os.makedirs(error_dir, exist_ok=True)
+            
+            with open(f"{error_dir}/error.log", "a") as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
+            
+            raise e
 
 
 if __name__ == "__main__":
-    error_timestamps = deque()
-    error_threshold = 10
-
-    while True:
-        try:
-            manager = ChessGameManager()
-            manager.run()
-        except KeyboardInterrupt:
-            print("\nGame interrupted by user.")
-            break
-        except Exception as e:
-            current_time = time.time()
-            error_timestamps.append(current_time)
-
-            while error_timestamps and current_time - error_timestamps[0] > 60:
-                error_timestamps.popleft()
-
-            if len(error_timestamps) >= error_threshold:
-                print(f"{len(error_timestamps)} errors occurred within 1 minute. Pausing and rebooting.")
-                time.sleep(60)
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            else:
-                print(f"An error occurred: {e.__class__.__name__} {e}")
-                print("Restarting the game in three seconds...")
-
-                session = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
-                error_dir = f"chess/play/logs/{session}_{['main', 'main'][0].upper()}_{['main', 'main'][1].upper()}"
-                os.makedirs(error_dir, exist_ok=True)
-                
-                with open(f"{error_dir}/error.log", "a") as f:
-                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
-                    
-                time.sleep(3)
+    manager = ChessGameManager()
+    manager.run()
