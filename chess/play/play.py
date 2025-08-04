@@ -172,12 +172,9 @@ class GameLoop:
         os.makedirs(os.path.dirname(move_log_path), exist_ok=True)
         return open(move_log_path, 'w')
         
-    def cleanup_logging(self, move_log_file, game_count: int):
+    def cleanup_logging(self, move_log_file):
         if move_log_file is not None and move_log_file != sys.stdout:
             move_log_file.close()
-            move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
-            log_name = f"{move_log_path.split('.')[0]}_FINISHED.log"
-            os.rename(move_log_path, log_name)
             
     def determine_winner(self, result: str, game_count: int) -> tuple[str, str]:
         if result != '1/2-1/2':
@@ -251,11 +248,15 @@ class GameLoop:
                 self.move_logger.footer(self.game_state.board, winner, winner_name, 
                                       game_count, self.game_state.wins, self.players, fen)
             )
+
+            move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
+            log_name = f"{move_log_path.split('.')[0]}_FINISHED.log"
+            os.rename(move_log_path, log_name)
             
             return True
             
         finally:
-            self.cleanup_logging(move_log_file, game_count)
+            self.cleanup_logging(move_log_file)
             
     def run(self):
         while True:
