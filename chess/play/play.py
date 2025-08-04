@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Refactored Chess Game Manager
+A clean class-based architecture for running chess games between bots.
+"""
+
 import argparse
 import chess
 import chess.pgn
@@ -5,259 +11,336 @@ import chess.engine
 import os
 import sys
 import time
-
 from collections import deque
-
 from datetime import datetime
+from typing import List, Optional, Any
 
-sys.path.insert(0, 'chess')  # Adjust path to import other_bots module
-import other_bots
 
-####################################################################################################
-#                                             GLOBALS                                              #
-####################################################################################################
+class GameState:
+    """Manages the current state of the chess game."""
+    
+    def __init__(self, fen: str = chess.STARTING_FEN):
+        self.board = chess.Board(fen)
+        self.original_fen = fen
+        self.players = []
+        self.wins = [0.0, 0.0]  # White, Black
+        self.game_count = 0
+        self.current_players = []
+        
+    def reset(self):
+        self.board = chess.Board(self.original_fen)
+        
+    def swap_players(self):
+        if len(self.players) == 2:
+            self.current_players = [self.players[1], self.players[0]]
+        else:
+            self.current_players = self.players.copy()
+            
+    def get_current_player(self, color: bool) -> Any:
+        return self.current_players[0] if color == chess.WHITE else self.current_players[1]
+        
+    def is_game_over(self) -> bool:
+        return self.board.is_game_over()
+        
+    def get_result(self) -> str:
+        return self.board.result()
+    
+    def get_turn(self) -> bool:
+        return self.board.turn
+        
+    def push_move(self, move: chess.Move):
+        self.board.push(move)
 
-players = [module.Computer for module in other_bots.__all__ if hasattr(module, 'Computer')]
-player_map = {module.__name__.split('.')[-1]: module for module in other_bots.__all__}
 
-# Argument Parser to select players
-parser = argparse.ArgumentParser(description="Play a chess game with selected bots.")
-parser.add_argument(
-    '-p', '--players',
-    '--player',
-    nargs=2,
-    choices=player_map.keys(),
-    help="Select the players to play with.",
-    default=['main', 'main']
-)
-parser.add_argument(
-    '-t', '--timeout', '--time',
-    type=float,
-    help="Set the timeout for each player in seconds.",
-    default=10.0
-)
-parser.add_argument(
-    '-l', '--log',
-    action='store_true',
-    help="Enable logging of the game moves to a file.",
-    default=False
-)
-parser.add_argument(
-    '-om', '--opening-moves',
-    type=int,
-    help="Number of opening moves to play before letting the bots play. Advised to be around 10.",
-    default=0
-)
-args = parser.parse_args()
-
-players = [player_map[bot].Computer for bot in args.players]
-
-print(f"Selected players: {args.players[0].capitalize()} vs {args.players[1].capitalize()}")
-
-####################################################################################################
-#                                             MOVE LOGS                                            #
-####################################################################################################
-
-def header():
-    index = game_count % 2
-    return f"""
- ----------- {(f'{args.players[index].upper()} ({WINS[index]})').ljust(10)} VS {(f'({WINS[1 - index]}) {args.players[1 - index].upper()}').rjust(10)} ------------
-| TIME : {(str(args.timeout) + ' SECONDS PER MOVE').rjust(40)} |
+class MoveLogger:
+    """Handles logging of game moves and display formatting."""
+    
+    def __init__(self, log_file: Optional[Any] = None):
+        self.log_file = log_file
+        
+    def print_and_log(self, *args, **kwargs):
+        print(*args, **kwargs)
+        if self.log_file is not None:
+            print(*args, file=self.log_file, **kwargs)
+            
+    def header(self, game_count: int, wins: List[float], players: List[str], timeout: float) -> str:
+        index = game_count % 2
+        return f"""
+ ----------- {(f'{players[index].upper()} ({wins[index]})').ljust(10)} VS {(f'({wins[1 - index]}) {players[1 - index].upper()}').rjust(10)} ------------
+| TIME : {(str(timeout) + ' SECONDS PER MOVE').rjust(40)} |
 | GAME BEGINS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(30)} |
  -------------------------------------------------
 """
 
-def footer(board: chess.Board, winner: str, winner_name: str):
-    index = game_count % 2
+    def footer(self, board: chess.Board, winner: str, winner_name: str, 
+               game_count: int, wins: List[float], players: List[str], fen: str) -> str:
+        index = game_count % 2
 
-    # Create a PGN game from the board's move stack
-    game = chess.pgn.Game()
-    game.headers["Event"] = "Chess Bot Match"
-    game.headers["Site"] = "Local"
-    game.headers["Date"] = datetime.now().strftime('%Y.%m.%d')
-    game.headers["Round"] = str(game_count + 1)
-    game.headers["White"] = args.players[index].capitalize()
-    game.headers["Black"] = args.players[1 - index].capitalize()
-    game.headers["Result"] = board.result()
+        game = chess.pgn.Game()
+        game.headers["Event"] = "Chess Bot Match"
+        game.headers["Site"] = "Local"
+        game.headers["Date"] = datetime.now().strftime('%Y.%m.%d')
+        game.headers["Round"] = str(game_count + 1)
+        game.headers["White"] = players[index].capitalize()
+        game.headers["Black"] = players[1 - index].capitalize()
+        game.headers["Result"] = board.result()
 
-    # Set the FEN header if the board is not in the starting position
-    if FEN != chess.STARTING_BOARD_FEN:
-        game.headers["FEN"] = FEN
-    node = game
-    for move in board.move_stack:
-        node = node.add_variation(move)
-    pgn_string = str(game)
-
-    return f"""
- ----------- {(f'{args.players[index].upper()} ({WINS[index]})').ljust(10)} VS {(f'({WINS[1 - index]}) {args.players[1 - index].upper()}').rjust(10)} ------------
+        if fen != chess.STARTING_BOARD_FEN:
+            game.headers["FEN"] = fen
+            
+        node = game
+        for move in board.move_stack:
+            node = node.add_variation(move)
+            
+        return f"""
+ ----------- {(f'{players[index].upper()} ({wins[index]})').ljust(10)} VS {(f'({wins[1 - index]}) {players[1 - index].upper()}').rjust(10)} ------------
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
 | WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
  -------------------------------------------------
 
-{pgn_string}"""
+{str(game)}"""
 
-SESSION = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 
-####################################################################################################
-#                                             MAIN LOOP                                            #
-####################################################################################################
-
-WINS = [0.0, 0.0]  # Initialize win counts for players
-
-def play_opening_moves(board: chess.Board) -> chess.Board:
-    """Play the opening moves of the game by the logic of the white computer."""
-
-    if not hasattr(players[0], 'random_opening_move'):
-        return board
-
-    global FEN
-    FEN = chess.STARTING_FEN
-
-    if args.opening_moves == 0:
-        return board
-
-    while True:
+class OpeningHandler:
+    """Handles opening moves with Stockfish evaluation."""
+    
+    def __init__(self, players: List[Any], opening_moves: int):
+        self.players = players
+        self.opening_moves = opening_moves
         
-        board_copy = board.copy()
-
-        for i in range(args.opening_moves * 2):
+    def play_opening_moves(self, game_state: GameState, fen: str) -> str:
+        if not hasattr(self.players[0], 'random_opening_move'):
+            return fen
             
-            move = players[0](board_copy.turn).random_opening_move(board_copy)
-            start = time.time()
-
-            while move is None:
-                if time.time() - start > 10:
-                    break
-                move = players[0](board_copy.turn).random_opening_move(board_copy)
-                
-            if move is None:
-                print("No more theory.")
-                break
-            print(f"Move {(i + 2) // 2}: {board_copy.san(move)}",end='\t')
-            board_copy.push(move)
-
-        # Only continue if the position is close to equal in score (0 ± 20)
-        engine = chess.engine.SimpleEngine.popen_uci("stockfish")
-        evaluation = engine.analyse(board_copy, chess.engine.Limit(time=1))
-        engine.quit()
-
-        score = evaluation["score"].white().score() # type: ignore
-        if score is None:
-            continue
-        if abs(score) < 20:
-            print(f"\nPosition is close to equal, score is {score}. Continuing.")
-            FEN = board_copy.fen()
-            return chess.Board(fen=FEN) # Return the FEN of the new board so the opening is not counted in accuracy
+        if self.opening_moves == 0:
+            return fen
+            
+        board = game_state.board.copy()
         
-        print(f"\nPosition is not close to equal, score is {score}.")
-
-global game_count
-game_count = 0
-
-def main():
-    """
-    Main function to play multiple games of chess with the given players.
-
-    This function will play multiple games of chess, alternating the colors of the players
-    each game. The FEN of the starting position is used for each game. The games are logged
-    to a file if specified with the --log flag.
-
-    The wins of each player are tracked and displayed after each game. The games are numbered
-    from 1 to the number of games specified.
-
-    The function will loop indefinitely until the user stops it.
-
-    :return: None
-    """
-
-
-    def print_and_log(*print_args, **kwargs):
-        """Prints to console and logs to file."""
-        print(*print_args, **kwargs)
-        if args.log:
-            print(*print_args, file=MOVELOG_FILE, **kwargs)
-
-    global players, game_count, FEN
-
-    original_players = players.copy()
-
-    while True:
-        MOVELOG_PATH = f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
-
-        FEN = chess.STARTING_FEN  # Starting position FEN
-        # FEN = "r1bq1rk1/pp1n1ppp/2pbpn2/3p4/2PP4/2N1PN2/PP2BPPP/R1BQ1RK1 w - - 0 9" # Sharp middlegame, helpful for testing attack potential
-        # FEN = "8/8/p1pr1k1p/3p1p1p/1P1P1P1P/2P5/5K2/6R1 w - - 0 1" # Rook and pawn endgame where white has a positional advantage, helpful for testing conversion into a win and using pieces well
-        # FEN = "8/6p1/1pb2k1p/4p3/1Bn1P3/5N2/PP4PP/6K1 w - - 0 1" # Quiet middlegame into endgame, white has a slight edge
-
-        if args.log:
-            os.makedirs(os.path.dirname(MOVELOG_PATH), exist_ok=True)
-            MOVELOG_FILE = open(MOVELOG_PATH, 'w')
-        else:
-            MOVELOG_FILE = sys.stdout
-
-        print(f"Game log will be saved to: {MOVELOG_PATH}")
-
-        # Assign players for this game based on game count to swap colors
-        if game_count % 2 == 0:
-            players = original_players
-        else:
-            players = original_players[::-1]
-
-        board = chess.Board(fen=FEN)
-        board = play_opening_moves(board)
-
-        print_and_log(header())
-
-        while not board.is_game_over():
-
-            for player in players:
-
-                print_and_log(board, "\n\n")
-
-                if board.is_game_over():
-                    break
-
-                move = player(board.turn).best_move(board, timeout=args.timeout)
-                if move is None:
-                    return
+        while True:
+            board_copy = board.copy()
+            
+            for i in range(self.opening_moves * 2):
+                move = self.players[0](board_copy.turn).random_opening_move(board_copy)
+                start = time.time()
                 
-                if board.turn == chess.WHITE:
-                    print_and_log(f"\n{board.fullmove_number}: {board.san(move)}")
-                else:
-                    print_and_log(f"... {board.san(move)}")
+                while move is None:
+                    if time.time() - start > 10:
+                        break
+                    move = self.players[0](board_copy.turn).random_opening_move(board_copy)
+                    
+                if move is None:
+                    print("No more theory.")
+                    break
+                print(f"Move {(i + 2) // 2}: {board_copy.san(move)}", end='\t')
+                board_copy.push(move)
+                
+            engine = chess.engine.SimpleEngine.popen_uci("stockfish")
+            evaluation = engine.analyse(board_copy, chess.engine.Limit(time=1))
+            engine.quit()
+            
+            score = evaluation["score"].white().score() # type: ignore
+            if score is None:
+                continue
+            if abs(score) < 20:
+                print(f"\nPosition is close to equal, score is {score}. Continuing.")
+                return board_copy.fen()
+            print(f"\nPosition is not close to equal, score is {score}.")
+            
 
-                board.push(move)
-
-        print_and_log(board, "\n\n")
-
-        winner = "DRAW"
-        winner_name = "DRAW"
-        if board.is_game_over() and board.result() != '1/2-1/2':
-            # Determine winner color
-            winner_color = chess.WHITE if board.result() == '1-0' else chess.BLACK
+class GameLoop:
+    """Manages the main game execution loop."""
+    
+    def __init__(self, game_state: GameState, move_logger: MoveLogger, 
+                 opening_handler: Optional[OpeningHandler], timeout: float,
+                 log_enabled: bool, players: List[str]):
+        self.game_state = game_state
+        self.move_logger = move_logger
+        self.opening_handler = opening_handler
+        self.timeout = timeout
+        self.log_enabled = log_enabled
+        self.players = players
+        self.session = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+        
+    def setup_logging(self, game_count: int):
+        if not self.log_enabled:
+            return None
+            
+        move_log_path = f"chess/play/logs/{self.session}_{self.players[0].upper()}_{self.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
+        os.makedirs(os.path.dirname(move_log_path), exist_ok=True)
+        return open(move_log_path, 'w')
+        
+    def cleanup_logging(self, move_log_file, game_count: int):
+        if move_log_file is not None and move_log_file != sys.stdout:
+            move_log_file.close()
+            move_log_path = f"chess/play/logs/{self.session}_{self.players[0].upper()}_{self.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log"
+            log_name = f"{move_log_path.split('.')[0]}_FINISHED.log"
+            os.rename(move_log_path, log_name)
+            
+    def determine_winner(self, result: str, game_count: int) -> tuple[str, str]:
+        if result != '1/2-1/2':
+            winner_color = chess.WHITE if result == '1-0' else chess.BLACK
             winner = "WHITE" if winner_color == chess.WHITE else "BLACK"
-
-            # Increment wins
+            
             win_index = 0 if winner == "WHITE" else 1
             if game_count % 2 == 0:
-                WINS[win_index] += 1
-                winner_name = args.players[win_index].upper()
+                self.game_state.wins[win_index] += 1
+                winner_name = self.players[win_index].upper()
             else:
-                WINS[1 - win_index] += 1
-                winner_name = args.players[1 - win_index].upper()
-        elif board.result() == '1/2-1/2':
-            WINS[0] += 0.5
-            WINS[1] += 0.5
+                self.game_state.wins[1 - win_index] += 1
+                winner_name = self.players[1 - win_index].upper()
+                
+            return winner, winner_name
+        else:
+            self.game_state.wins[0] += 0.5
+            self.game_state.wins[1] += 0.5
+            return "DRAW", "DRAW"
+            
+    def play_single_game(self, game_count: int) -> bool:
+        move_log_file = self.setup_logging(game_count)
+        self.move_logger.log_file = move_log_file
+        
+        try:
+            if game_count % 2 == 0:
+                self.game_state.current_players = self.game_state.players
+            else:
+                self.game_state.current_players = [self.game_state.players[1], self.game_state.players[0]]
+                
+            self.game_state.reset()
+            
+            fen = self.game_state.original_fen
+            if self.opening_handler:
+                fen = self.opening_handler.play_opening_moves(self.game_state, fen)
+                self.game_state.board = chess.Board(fen)
+                
+            if move_log_file is not None:
+                print(f"Game log will be saved to: chess/play/logs/{self.session}_{self.players[0].upper()}_{self.players[1].upper()}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
+                
+            self.move_logger.print_and_log(
+                self.move_logger.header(game_count, self.game_state.wins, self.players, self.timeout)
+            )
+            
+            while not self.game_state.is_game_over():
+                for player_idx, player in enumerate(self.game_state.current_players):
+                    self.move_logger.print_and_log(self.game_state.board, "\n\n")
+                    
+                    if self.game_state.is_game_over():
+                        break
+                        
+                    current_player = player(self.game_state.get_turn())
+                    move = current_player.best_move(self.game_state.board, timeout=self.timeout)
+                    
+                    if move is None:
+                        return False
+                        
+                    if self.game_state.get_turn() == chess.WHITE:
+                        self.move_logger.print_and_log(f"\n{self.game_state.board.fullmove_number}: {self.game_state.board.san(move)}")
+                    else:
+                        self.move_logger.print_and_log(f"... {self.game_state.board.san(move)}")
+                        
+                    self.game_state.push_move(move)
+                    
+            self.move_logger.print_and_log(self.game_state.board, "\n\n")
+            
+            result = self.game_state.get_result()
+            winner, winner_name = self.determine_winner(result, game_count)
+            
+            self.move_logger.print_and_log(
+                self.move_logger.footer(self.game_state.board, winner, winner_name, 
+                                      game_count, self.game_state.wins, self.players, fen)
+            )
+            
+            return True
+            
+        finally:
+            self.cleanup_logging(move_log_file, game_count)
+            
+    def run(self):
+        while True:
+            success = self.play_single_game(self.game_state.game_count)
+            if success:
+                self.game_state.game_count += 1
+            time.sleep(2)
 
-        print_and_log(footer(board, winner, winner_name))
 
-        game_count += 1
-
-        # Add FINISHED to the end of the file log name
-        log_name = f"{MOVELOG_PATH.split('.')[0]}_FINISHED.log"
-        os.rename(MOVELOG_PATH, log_name)
-
-        time.sleep(2)
+class ChessGameManager:
+    """Main orchestrator for chess games."""
+    
+    def __init__(self):
+        self.args = self._parse_arguments()
+        self.setup_paths()
+        self.players = self._setup_players()
+        
+    def _parse_arguments(self) -> argparse.Namespace:
+        parser = argparse.ArgumentParser(description="Play a chess game with selected bots.")
+        sys.path.insert(0, 'chess')
+        import other_bots
+        player_map = {module.__name__.split('.')[-1]: module for module in other_bots.__all__}
+        
+        parser.add_argument(
+            '-p', '--players',
+            '--player',
+            nargs=2,
+            choices=list(player_map.keys()),
+            help="Select the players to play with.",
+            default=['main', 'main']
+        )
+        parser.add_argument(
+            '-t', '--timeout', '--time',
+            type=float,
+            help="Set the timeout for each player in seconds.",
+            default=10.0
+        )
+        parser.add_argument(
+            '-l', '--log',
+            action='store_true',
+            help="Enable logging of the game moves to a file.",
+            default=False
+        )
+        parser.add_argument(
+            '-om', '--opening-moves',
+            type=int,
+            help="Number of opening moves to play before letting the bots play.",
+            default=0
+        )
+        parser.add_argument(
+            '-fen', '--fen',
+            type=str,
+            help="Initial FEN position of the board. Overrides opening moves if provided.",
+            default=chess.STARTING_FEN
+        )
+        return parser.parse_args()
+        
+    def setup_paths(self):
+        """Setup system paths for imports."""
+        sys.path.insert(0, 'chess')
+        
+    def _setup_players(self) -> List[Any]:
+        """Setup player modules."""
+        import other_bots
+        player_map = {module.__name__.split('.')[-1]: module for module in other_bots.__all__}
+        return [player_map[bot].Computer for bot in self.args.players]
+        
+    def run(self):
+        """Main entry point."""
+        print(f"Selected players: {self.args.players[0].capitalize()} vs {self.args.players[1].capitalize()}")
+        
+        game_state = GameState(fen=self.args.fen)
+        game_state.players = self.players
+        
+        move_logger = MoveLogger()
+        opening_handler = OpeningHandler(self.players, self.args.opening_moves) if self.args.opening_moves > 0 and self.args.fen == chess.STARTING_FEN else None
+        
+        game_loop = GameLoop(
+            game_state=game_state,
+            move_logger=move_logger,
+            opening_handler=opening_handler,
+            timeout=self.args.timeout,
+            log_enabled=self.args.log,
+            players=self.args.players
+        )
+        
+        game_loop.run()
 
 
 if __name__ == "__main__":
@@ -266,7 +349,8 @@ if __name__ == "__main__":
 
     while True:
         try:
-            main()
+            manager = ChessGameManager()
+            manager.run()
         except KeyboardInterrupt:
             print("\nGame interrupted by user.")
             break
@@ -274,20 +358,22 @@ if __name__ == "__main__":
             current_time = time.time()
             error_timestamps.append(current_time)
 
-            # Remove timestamps older than 60 seconds
             while error_timestamps and current_time - error_timestamps[0] > 60:
                 error_timestamps.popleft()
 
             if len(error_timestamps) >= error_threshold:
                 print(f"{len(error_timestamps)} errors occurred within 1 minute. Pausing and rebooting.")
                 time.sleep(60)
-                # Rerun the file
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             else:
                 print(f"An error occurred: {e.__class__.__name__} {e}")
                 print("Restarting the game in three seconds...")
 
-                with open(f"chess/play/logs/{SESSION}_{args.players[0].upper()}_{args.players[1].upper()}/error.log", "a") as f:
+                session = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+                error_dir = f"chess/play/logs/{session}_{['main', 'main'][0].upper()}_{['main', 'main'][1].upper()}"
+                os.makedirs(error_dir, exist_ok=True)
+                
+                with open(f"{error_dir}/error.log", "a") as f:
                     f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
-
+                    
                 time.sleep(3)
