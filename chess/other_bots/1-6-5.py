@@ -797,19 +797,6 @@ class Computer:
                         piece_color = board.color_at(square)
                         if piece is not None and piece_color != color and piece in [chess.ROOK, chess.QUEEN]:
                             king_penalty += 2.0
-
-                # Treat the king as a queen, and penalise for the number of moves the queen can make
-                # Replace king with queen
-                # Create a temporary board with king replaced by queen
-                temp_board = board.copy()
-                temp_board.remove_piece_at(king_square)
-                temp_board.set_piece_at(king_square, chess.Piece(chess.QUEEN, color))
-                
-                # Count how many moves the queen can make
-                queen_moves = len(list(temp_board.legal_moves))
-                
-                # Penalize based on queen moves
-                king_penalty += queen_moves ** 2 * 0.5
                 
                 return king_penalty
 
