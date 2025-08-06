@@ -259,11 +259,10 @@ class GameLoop:
             self.cleanup_logging(move_log_file)
             
     def run(self):
-        while True:
-            success = self.play_single_game(self.game_state.game_count)
-            if success:
-                self.game_state.game_count += 1
-            time.sleep(2)
+        success = self.play_single_game(self.game_state.game_count)
+        if success:
+            self.game_state.game_count += 1
+        time.sleep(2)
 
 
 class ChessGameManager:
@@ -343,26 +342,26 @@ class ChessGameManager:
             players=self.args.players
         )
         
-        try:
-            game_loop.run()
-        except KeyboardInterrupt:
-            print("\nGame interrupted by user.")
-            sys.exit(0)
-        except Exception as e:
-            # Log error using GameLoop's session
-            session = game_loop.session
-            players = self.args.players
-            
-            error_dir = f"chess/play/logs/{session}"
-            os.makedirs(error_dir, exist_ok=True)
-            
-            with open(f"{error_dir}/error.log", "a") as f:
-                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
-            
-            print(f"Game interrupted by error: {e}")
-            print(f"Error logs saved to: {error_dir}")
-            
-            time.sleep(5)
+        while True:
+            try:
+                game_loop.run()
+            except KeyboardInterrupt:
+                print("\nGame interrupted by user.")
+                sys.exit(0)
+            except Exception as e:
+                # Log error using GameLoop's session
+                session = game_loop.session
+                
+                error_dir = f"chess/play/logs/{session}"
+                os.makedirs(error_dir, exist_ok=True)
+                
+                with open(f"{error_dir}/error.log", "a") as f:
+                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
+                
+                print(f"Game interrupted by error: {e}")
+                print(f"Error logs saved to: {error_dir}")
+                
+                time.sleep(5)
 
 
 if __name__ == "__main__":
