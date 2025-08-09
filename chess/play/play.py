@@ -120,7 +120,7 @@ class OpeningHandler:
         while True:
             board_copy = board.copy()
             
-            for i in range(self.opening_moves * 2):
+            for _ in range(self.opening_moves * 2):
                 move = self.players[0](board_copy.turn).random_opening_move(board_copy)
                 start = time.time()
                 
@@ -132,7 +132,7 @@ class OpeningHandler:
                 if move is None:
                     print("No more theory.")
                     break
-                print(f"Move {(i + 2) // 2}: {board_copy.san(move)}", end='\t')
+                print(f"{board_copy.san(move)}", end='\t', flush=True)
                 board_copy.push(move)
                 
             engine = chess.engine.SimpleEngine.popen_uci("stockfish")
