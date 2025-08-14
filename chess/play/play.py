@@ -8,9 +8,11 @@ import argparse
 import chess
 import chess.pgn
 import chess.engine
+import linecache
 import os
 import sys
 import time
+import traceback
 from collections import deque
 from datetime import datetime
 from typing import List, Optional, Any
@@ -250,7 +252,7 @@ class GameLoop:
             )
 
             move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
-            log_name = f"{move_log_path.split('.')[0]}_FINISHED.log"
+            log_name = f"{move_log_path.split('.')[0]}_{winner_name}.log"
             os.rename(move_log_path, log_name)
             
             return True
@@ -322,6 +324,37 @@ class ChessGameManager:
         import other_bots
         player_map = {module.__name__.split('.')[-1]: module for module in other_bots.__all__}
         return [player_map[bot].Computer for bot in self.args.players]
+
+    def log_error(self, e: Exception, game_state: GameState, game_loop: GameLoop) -> None:
+        # Get traceback info
+        tb = traceback.extract_tb(e.__traceback__)[-1]
+        filename = tb.filename
+        line_number = tb.lineno or 0
+        line_content = linecache.getline(filename, line_number).strip()
+        
+        # Log error using GameLoop's session
+        session = game_loop.session
+        
+        error_dir = f"chess/play/logs/{session}"
+        os.makedirs(error_dir, exist_ok=True)
+
+        error_message = f"""
+{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+ERROR: {e.__class__.__name__}
+LOCATION: {filename}:{line_number}
+LINE: {line_content}
+TRACEBACK:
+
+{traceback.format_exc()}
+"""
+        with open(f"{error_dir}/error.log", "a") as f:
+            f.write(error_message)
+        with open(f"{error_dir}/G{game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
+            f.write(error_message)
+
+        print(f"Game interrupted by error. Error logged to {error_dir}.")
+        
+        time.sleep(5)
         
     def run(self):
         """Main entry point."""
@@ -349,19 +382,7 @@ class ChessGameManager:
                 print("\nGame interrupted by user.")
                 sys.exit(0)
             except Exception as e:
-                # Log error using GameLoop's session
-                session = game_loop.session
-                
-                error_dir = f"chess/play/logs/{session}"
-                os.makedirs(error_dir, exist_ok=True)
-                
-                with open(f"{error_dir}/error.log", "a") as f:
-                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {e.__class__.__name__}: {e}\n")
-                
-                print(f"Game interrupted by error: {e}")
-                print(f"Error logs saved to: {error_dir}")
-                
-                time.sleep(5)
+                self.log_error(e, game_state, game_loop)
 
 
 if __name__ == "__main__":
