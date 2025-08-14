@@ -1,12 +1,13 @@
 import chess
 import chess.polyglot
+import math
 import random as rnd
 import requests
 import sqlite3
 import time
 import urllib.parse
 
-__version__ = '1.6.4'
+__version__ = '1.7'
 
 class Computer:
 
@@ -98,19 +99,21 @@ class Computer:
         
         zobrist_key = str(chess.polyglot.zobrist_hash(board))
         try:
-            # Check existing depth for the zobrist_key
-            self.cursor.execute("SELECT depth FROM transposition_table WHERE zobrist_key = ?", (zobrist_key,))
-            row = self.cursor.fetchone()
-            if row is None:
-                # No existing entry, insert new
-                self.cursor.execute("INSERT INTO transposition_table (zobrist_key, score, depth) VALUES (?, ?, ?)", (zobrist_key, score, depth,))
-                # self.conn.commit()
-            else:
-                existing_depth = row[0]
-                if depth > existing_depth:
-                    # Update only if new depth is higher
-                    self.cursor.execute("UPDATE transposition_table SET score = ?, depth = ? WHERE zobrist_key = ?", (score, depth, zobrist_key))
-                    # self.conn.commit()
+            # Use UPSERT to handle both insert and update in a single query
+            self.cursor.execute("""
+                INSERT INTO transposition_table (zobrist_key, score, depth) 
+                VALUES (?, ?, ?)
+                ON CONFLICT(zobrist_key) 
+                DO UPDATE SET 
+                    score = CASE 
+                        WHEN excluded.depth > transposition_table.depth THEN excluded.score 
+                        ELSE transposition_table.score 
+                    END,
+                    depth = CASE 
+                        WHEN excluded.depth > transposition_table.depth THEN excluded.depth 
+                        ELSE transposition_table.depth 
+                    END
+            """, (zobrist_key, score, depth))
         except sqlite3.Error as e:
             print(f"Error saving evaluation to DB: {e}")
 
@@ -144,6 +147,18 @@ class Computer:
 
     OPENING_LEAVE_CHANCE = 0.05  # Chance to leave the opening book
 
+    def can_sygyzy(self, board: chess.Board, best_score: float) -> bool:
+        num_pieces = len(board.piece_map().values())
+        if num_pieces > 7:
+            return False
+
+        win_threshold = float('inf') * (1 if board.turn == chess.WHITE else -1)
+        lose_threshold = 1e5 * (-1 if board.turn == chess.WHITE else 1)
+        if best_score >= win_threshold or best_score <= lose_threshold:
+            return False
+
+        return True
+
     def sygyzy_query(self, board: chess.Board) -> dict:
         """
         Query the Syzygy tablebase server for the given board position.
@@ -169,24 +184,23 @@ class Computer:
         else:
             raise requests.RequestException(f"Request to Syzygy tablebase server failed with status code {response.status_code}")
 
-    def best_sygyzy(self, board: chess.Board) -> chess.Move | None:
+    def best_sygyzy(self, board: chess.Board, best_score: float) -> chess.Move | None:
         """
         Get the best move from the Syzygy tablebase server for the given board position.
 
         Args:
             board (chess.Board): The chess board position to get the best move for.
+            best_score (float): The best score for the board position.
 
         Returns:
             chess.Move: The best move from the Syzygy tablebase server.
             None: If no best move is found.
         """
 
-        num_pieces = len(board.piece_map().values())
-        if num_pieces > 7: # Syzygy only supports up to 7 pieces
+        if not self.can_sygyzy(board, best_score):
             return None
 
         response = self.sygyzy_query(board)
-        print([move["uci"] for move in response["moves"]])
         return chess.Move.from_uci(response["moves"][0]["uci"])
 
     def opening_query(self, board: chess.Board) -> dict:
@@ -202,6 +216,9 @@ class Computer:
         Raises:
             requests.RequestException: If the request to the opening book server fails.
         """
+
+        if self.get_game_stage(board.piece_map()) == "late":
+            return {"moves": []}
 
         fen = board.fen()
         fen_encoded = urllib.parse.quote(fen)
@@ -351,14 +368,14 @@ class Computer:
         :param move: The move to score
         :return: An integer score for move ordering
         """
-        victim = board.piece_at(move.to_square)
-        attacker = board.piece_at(move.from_square)
+        victim = board.piece_type_at(move.to_square)
+        attacker = board.piece_type_at(move.from_square)
 
         if victim is None or attacker is None:
             return 0
 
-        victim_value = self.MATERIAL.get(victim.piece_type, 0)
-        attacker_value = self.MATERIAL.get(attacker.piece_type, 0)
+        victim_value = self.MATERIAL.get(victim, 0)
+        attacker_value = self.MATERIAL.get(attacker, 0)
 
         # Higher score for capturing more valuable victim with less valuable attacker
         return (victim_value * 10) - attacker_value
@@ -416,6 +433,8 @@ class Computer:
         chess.KING: 25
     }
 
+    ESTIMATED_PAWN_VALUE = 8000
+
     def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, original_depth: int = 0, heuristic_sort: bool = True, heuristic_eliminate: bool = True, use_mvv_lva: bool = False) -> float:
         """
         Evaluate the best move to make using the Minimax algorithm.
@@ -436,11 +455,15 @@ class Computer:
         :type heuristic_eliminate: bool
         :param use_mvv_lva: Whether to order moves using MVV-LVA heuristic
         :type use_mvv_lva: bool
-        :return: The best score possible for the maximizing player
+        :return: The best score possible for the maximizing player, or None if timeout occurred
         :rtype: float
         """
 
         self.nodes_explored += 1
+
+        # Check for timeout at the start of evaluation
+        if self.is_timeup():
+            return float('nan')  # Return NaN to indicate timeout
 
         # Instant game over checks
         if board.is_checkmate():
@@ -449,16 +472,38 @@ class Computer:
                 return float('-inf')
             else:
                 return float('inf')
-        elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw():
+        elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.is_repetition(count=3):
             return 0
 
-        if depth == 0 or self.is_timeup():
+        if depth == 0:
             self.leaf_nodes_explored += 1
             return self.evaluate(board)
 
         is_maximizing = board.turn == chess.WHITE
         best_score = float('-inf') if is_maximizing else float('inf')
         best_move = None
+
+        # Futility pruning
+        # Only apply futility pruning when not in check and at frontier nodes
+        if depth <= 2 and not board.is_check():
+            # Use a margin based on ESTIMATED_PAWN_VALUE
+            # For depth 2: use 2.5 * pawn value, for depth 1: use 1.5 * pawn value
+            margin = self.ESTIMATED_PAWN_VALUE * (2.5 if depth == 2 else 1.5)
+            
+            # Get static evaluation of current position
+            static_eval = self.evaluate(board)
+            
+            # For maximizing player (white)
+            if is_maximizing and static_eval + margin < alpha:
+                self.prunes += len(list(board.legal_moves))
+                self.alpha_cuts += len(list(board.legal_moves))
+                return static_eval + margin
+            
+            # For minimizing player (black)
+            elif not is_maximizing and static_eval - margin > beta:
+                self.prunes += len(list(board.legal_moves))
+                self.beta_cuts += len(list(board.legal_moves))
+                return static_eval - margin
 
         search_depth = original_depth - depth
 
@@ -545,6 +590,11 @@ class Computer:
             else:
                 return -(abs(x) ** y)
 
+        # Try to get score from DB cache
+        cached_score = self.evaluate_from_db(board)
+        if cached_score is not None:
+            return cached_score
+
         # Cache piece map once
         piece_map = board.piece_map()
         PIECES = {
@@ -552,14 +602,7 @@ class Computer:
             chess.BLACK : {s : p for s, p in piece_map.items() if p.color == chess.BLACK}
         }
 
-        # Try to get score from DB cache
-        cached_score = self.evaluate_from_db(board)
-        if cached_score is not None:
-            return cached_score
-
-        # (Moved game over check to minimax to avoid repeated calls)
-
-        stage = self.get_game_stage(board)
+        stage = self.get_game_stage(piece_map)
 
         # Cache pawns by color
         PAWNS = {chess.WHITE: [], chess.BLACK: []}
@@ -594,16 +637,71 @@ class Computer:
             aggression[color] = min(material[color] / (2 * material[not color]), 1.5) ** 2
             aggression[color] *= 0.5 if stage == 'early' else 1.75 if stage == 'middle' else 1.25
 
+        def piece_loop(color: chess.Color) -> dict:
+
+            mobility_score = 0
+            heatmap_score = 0
+            minor_piece_development_bonus = 0
+            aggression_score = 0
+            attacks_cache: dict[chess.Square, chess.SquareSet] = {}
+
+            starting_squares = {
+                chess.WHITE: {
+                    chess.KNIGHT: [chess.B1, chess.G1],
+                    chess.BISHOP: [chess.C1, chess.F1]
+                },
+                chess.BLACK: {
+                    chess.KNIGHT: [chess.B8, chess.G8],
+                    chess.BISHOP: [chess.C8, chess.F8]
+                }
+            }
+
+            for square, piece in PIECES[color].items():
+                # Mobility
+                mobility_count = len(attacks_cache.get(square, []))
+                weight = piece_weight.get(piece.piece_type, 1.0)
+                mobility_score += (mobility_count ** 0.75) * weight * 0.5
+
+                # Heatmap
+                piece_symbol = piece.symbol().upper()
+                rank = chess.square_rank(square)
+                file = chess.square_file(square)
+
+                if piece.color == chess.WHITE:
+                    rank = 7 - rank
+                heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file]
+
+                # MPDB
+                if piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
+                    if square not in starting_squares[color][piece.piece_type]:
+                        minor_piece_development_bonus += 1.5
+
+                # Aggression
+                dist = chess.square_distance(square, KINGS[not color])
+                aggression_score += self.MATERIAL[piece.piece_type] / max(1, dist) * 5
+
+                # Attack cache
+                attacks_cache[square] = board.attacks(square)
+
+            return {
+                "mobility_score" : mobility_score,
+                "heatmap_score" : heatmap_score,
+                "minor_piece_development_bonus" : minor_piece_development_bonus,
+                "aggression_score" : aggression_score,
+                "attacks_cache" : attacks_cache
+            }
+
         def evaluate_player(color: chess.Color) -> float:
             king_square = KINGS[color]
             enemy_king_square = KINGS[not color]
             if king_square is None or enemy_king_square is None:
                 return 0
 
+            PIECE_SCORES = piece_loop(color)
+
             # Cache attacked squares and attacks per piece to avoid repeated calls
-            attacks_cache = {square: board.attacks(square) for square in PIECES[color].keys()}
+            attacks_cache = PIECE_SCORES["attacks_cache"]
             attacked_squares = [sq for attacks in attacks_cache.values() for sq in attacks]
-            attacked_squares_set = set(attacked_squares)
 
             # Legal moves are only important if it's the player's turn
             legal_moves = list(board.legal_moves) if color == board.turn else []
@@ -612,50 +710,60 @@ class Computer:
                 attack_bonus = 0
                 cover_bonus = 0
 
-                cover_bonus = len(attacked_squares) / sum(self.MATERIAL[piece_map[sq].piece_type] for sq in attacks_cache.keys())
-
                 attacked_square_counts = {}
+                center_squares = {chess.E4, chess.E5, chess.D4, chess.D5}
+                
+                # Calculate cover bonus denominator once
+                cover_denominator = sum(self.MATERIAL[piece_map[sq].piece_type] for sq in attacks_cache.keys())
+                cover_bonus = len(attacked_squares) / cover_denominator if cover_denominator > 0 else 0
+
+                # Single loop through attacked squares to build counts
                 for sq in attacked_squares:
                     attacked_square_counts[sq] = attacked_square_counts.get(sq, 0) + 1
 
-                for square in attacked_squares_set:
-                    count = attacked_square_counts[square]
+                # Single loop through unique squares
+                for square, count in attacked_square_counts.items():
                     attack_bonus += count ** 1.25
 
-                    piece = board.piece_at(square)
+                    piece_type = board.piece_type_at(square)
+                    piece_color = board.color_at(square)
                     rank = chess.square_rank(square)
 
-                    # Reward centre control
-                    if square in [chess.E4, chess.E5, chess.D4, chess.D5]:
-                        attack_bonus += 2.5 * aggression[color]
-                    # Reward control of enemy half
-                    if color == chess.WHITE and rank > 3:
-                        attack_bonus += 1.5 * aggression[color]
-                    elif color == chess.BLACK and rank < 4:
-                        attack_bonus += 1.5 * aggression[color]
+                    # Pre-calculate aggression multiplier
+                    agg_mult = aggression[color]
+                    
+                    # Center control bonus
+                    if square in center_squares:
+                        attack_bonus += 2.5 * agg_mult
+                    
+                    # Enemy half bonus
+                    if (color == chess.WHITE and rank > 3) or (color == chess.BLACK and rank < 4):
+                        attack_bonus += 1.5 * agg_mult
 
-                    if piece is None:
-                        continue
+                    if piece_type is not None:
+                        piece_weight_val = piece_weight[piece_type] ** 0.6
+                        stage_mult = 7 if stage == 'late' else 4
+                        back_rank_mult = 6 if stage == 'late' else 3
+                        
+                        # Enemy half piece bonus
+                        if (color == chess.WHITE and rank > 3) or (color == chess.BLACK and rank < 4):
+                            attack_bonus += piece_weight_val * agg_mult * stage_mult
+                        
+                        # Back rank penalty
+                        if (color == chess.WHITE and rank < 2) or (color == chess.BLACK and rank > 5):
+                            attack_bonus -= piece_weight_val * agg_mult * back_rank_mult
+                        
+                        # Attack/defense bonuses
+                        if piece_color != color:
+                            attack_bonus += self.MATERIAL[piece_type] ** 1.5 * agg_mult
+                        else:
+                            attack_bonus += self.MATERIAL[piece_type] ** 0.9 * 2 * aggression[not color]
 
-                    # Reward pieces in the enemy half
-                    if color == chess.WHITE and rank > 3:
-                        attack_bonus += piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (7 if stage == 'late' else 4)
-                    elif color == chess.BLACK and rank < 4:
-                        attack_bonus += piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (7 if stage == 'late' else 4)
-
-                    # Penalise pieces in the back 2 ranks
-                    if color == chess.WHITE and rank < 2:
-                        attack_bonus -= piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (6 if stage == 'late' else 3)
-                    elif color == chess.BLACK and rank > 5:
-                        attack_bonus -= piece_weight[piece.piece_type] ** 0.6 * aggression[color] * (6 if stage == 'late' else 3)
-
-                    # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
-                    if piece.color != color:
-                        attack_bonus += self.MATERIAL[piece.piece_type] ** 1.5 * aggression[color]
-                    else:
-                        attack_bonus += self.MATERIAL[piece.piece_type] ** 0.9 * 2 * aggression[not color]
-
-                return abs(attack_bonus) ** 0.5 * (abs(attack_bonus) / attack_bonus) + cover_bonus
+                # Handle edge case where attack_bonus is 0
+                if attack_bonus == 0:
+                    return cover_bonus
+                
+                return abs(attack_bonus) ** 0.5 * (1 if attack_bonus > 0 else -1) + cover_bonus
 
             def control() -> float:
                 control_bonus = 0
@@ -676,29 +784,11 @@ class Computer:
                 return control_bonus
 
             def material_score() -> float:
-                base_score = material[color]
-
-                mobility_score = 0
-                for square, piece in PIECES[color].items():
-                    mobility_count = len(attacks_cache.get(square, []))
-                    weight = piece_weight.get(piece.piece_type, 1.0)
-                    mobility_score += (mobility_count ** 0.75) * weight * 0.5
-
-                return base_score + mobility_score
+                base_score = material[color] ** 2 / (material[not color] + 1)
+                return base_score + PIECE_SCORES["mobility_score"]
 
             def heatmap() -> float:
-                heatmap_score = 0
-                for square, piece in PIECES[color].items():
-                    piece_symbol = piece.symbol().upper()
-
-                    rank = chess.square_rank(square)
-                    file = chess.square_file(square)
-
-                    if piece.color == chess.WHITE:
-                        rank = 7 - rank
-                    heatmap_score += self.HEATMAP[stage][piece_symbol][rank][file]
-
-                return heatmap_score
+                return PIECE_SCORES["heatmap_score"]
 
             def low_legal_penalty() -> float:
                 if color == board.turn:
@@ -711,48 +801,28 @@ class Computer:
                 return 1 / len(legal_moves_local) if legal_moves_local else 1
 
             def minor_piece_bonus() -> float:
-                minor_piece_development_bonus = 0
-                starting_squares = {
-                    chess.WHITE: {
-                        chess.KNIGHT: [chess.B1, chess.G1],
-                        chess.BISHOP: [chess.C1, chess.F1]
-                    },
-                    chess.BLACK: {
-                        chess.KNIGHT: [chess.B8, chess.G8],
-                        chess.BISHOP: [chess.C8, chess.F8]
-                    }
-                }
-                for square, piece in PIECES[color].items():
-                    if piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
-                        if square not in starting_squares[color][piece.piece_type]:
-                            minor_piece_development_bonus += 1.5
-
-                return minor_piece_development_bonus
+                return PIECE_SCORES["minor_piece_development_bonus"]
 
             def king_safety_penalty() -> float:
                 king_penalty = 0
                 king_start_square = chess.E1 if color == chess.WHITE else chess.E8
                 has_moved = king_square != king_start_square
+
                 if stage != 'late' and (not board.has_castling_rights(color)) and has_moved:
                     king_penalty += 50.0
-                king_moves = list(board.attacks(king_square))
+                king_moves = list(attacks_cache.get(king_square, []))
                 king_penalty -= len(king_moves) ** 0.5
 
-                files_to_check = []
-                king_file = chess.square_file(king_square)
-                if king_file > 0:
-                    files_to_check.append(king_file - 1)
-                files_to_check.append(king_file)
-                if king_file < 7:
-                    files_to_check.append(king_file + 1)
-
-                for file in files_to_check:
-                    for rank in range(8):
-                        square = chess.square(file, rank)
-                        piece = board.piece_at(square)
-                        if piece is not None and piece.color != color and piece.piece_type in [chess.ROOK, chess.QUEEN]:
-                            king_penalty += 2.0
-
+                # Treat the king as a queen and penalise for the moves that the queen can make
+                attacks = chess.BB_DIAG_ATTACKS[king_square][chess.BB_DIAG_MASKS[king_square] & board.occupied]
+                attacks |= (chess.BB_RANK_ATTACKS[king_square][chess.BB_RANK_MASKS[king_square] & board.occupied] |
+                                chess.BB_FILE_ATTACKS[king_square][chess.BB_FILE_MASKS[king_square] & board.occupied])
+            
+                # Get number of attacks
+                num_attacks = bin(attacks).count('1')
+                
+                king_penalty += num_attacks ** 2 * 0.5
+                
                 return king_penalty
 
             def pawn_structure() -> float:
@@ -816,9 +886,10 @@ class Computer:
 
                         # Reward passed pawns
                         if enemy_pawns_bb & front_mask == 0:
-                            pawn_score += (3.0 if stage == 'late' else 2.0)
+                            rank_bonus = (1 + (rank / 7 if color == chess.WHITE else 1 - rank / 7)) ** 4
+                            pawn_score += (3.0 if stage == 'late' else 2.0) * rank_bonus
                             if connected & (1 << square):
-                                pawn_score += (2.0 if stage == 'late' else 1.0)
+                                pawn_score += (2.0 if stage == 'late' else 1.0) * rank_bonus # Extra bonus if pawn is connected
 
                 if king_square is not None:
                     for square in chess.SquareSet(pawns_bb):
@@ -829,51 +900,33 @@ class Computer:
                 return pawn_score
 
             def attack_quality() -> float:
-                aggression_score = 0
-                enemy_king_square = KINGS[not color]
-                
+                aggression_score = PIECE_SCORES["aggression_score"]
                 material_diff = material[color] - material[not color]
-
-                for square, piece in PIECES[color].items():
-                    dist = chess.square_distance(square, enemy_king_square)
-                    if dist == 0:
-                        dist = 1
-                    aggression_score += self.MATERIAL[piece.piece_type] / dist * 5
 
                 if board.is_check():
                     if board.turn == color:
-                        aggression_score -= 1
+                        aggression_score -= 3
                     else:
-                        aggression_score += 1
-
-                attacked_squares_cache = {}
+                        aggression_score += 3
 
                 for move in legal_moves:
-                    # Cache attacked squares per move
-                    to_sq = move.to_square
-                    if to_sq not in attacked_squares_cache:
-                        attacked_squares_cache[to_sq] = board.attacks(to_sq)
 
                     # Reward types of moves
-                    board.push(move)
-                    if board.is_check():
-                        aggression_score += 0.5
                     if board.is_capture(move):
-                        aggression_score += 0.7
-                    if enemy_king_square in attacked_squares_cache[move.to_square]:
-                        aggression_score += 1.0
-                    board.pop()
+                        aggression_score += 0.75
+                    else: # No victim, so continue
+                        continue
 
                     # Reward moves that attack opponent's pieces
-                    victim = board.piece_at(move.to_square)
-                    if not victim:
-                        continue
-                    attacker = board.piece_at(move.from_square)
-                    if not attacker:
+                    victim = board.piece_type_at(move.to_square)
+                    attacker = board.piece_type_at(move.from_square)
+                    
+                    # Skip if no victim or attacker (shouldn't happen, but it stops the errors showing up)
+                    if not victim or not attacker:
                         continue
 
-                    victim_material = self.MATERIAL[victim.piece_type]
-                    attacker_material = self.MATERIAL[attacker.piece_type]
+                    victim_material = self.MATERIAL[victim]
+                    attacker_material = self.MATERIAL[attacker]
                     if victim_material > attacker_material:
                         aggression_score += 2.0
                     if material_diff + victim_material - attacker_material > 1.5:
@@ -889,10 +942,10 @@ class Computer:
                         if len(defenders) == 0:
                             aggression_score += self.MATERIAL[piece.piece_type] * len(attackers) * 2.0
                         else:
-                            defender = board.piece_at(next(iter(defenders)))
+                            defender = board.piece_type_at(next(iter(defenders)))
                             if defender is None:
                                 continue
-                            defender_value = self.MATERIAL[defender.piece_type]
+                            defender_value = self.MATERIAL[defender]
                             if self.MATERIAL[piece.piece_type] < defender_value:
                                 aggression_score += self.MATERIAL[piece.piece_type] * len(attackers)
                             else:
@@ -901,15 +954,15 @@ class Computer:
                 return aggression_score
 
             score = 0
-            score -= king_safety_penalty() * 5.5 * (0.1 if stage == 'late' else 1)
+            score -= king_safety_penalty() * (0.75 if stage == 'late' else 7.5)
             score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += material_score() ** 2.5 * (50 if stage == 'late' else 25)
-            score += coverage() * aggression[color] * (0.3 if stage == 'late' else 0.1)
-            score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * (30 if stage == 'late' else 22.5 if stage == 'early' else 15)
-            score += (control() ** 1.25) * aggression[color] * (0.8 if stage == 'late' else 0.525 if stage == 'early' else 0.35)
+            score += material_score() ** 2.5 * (15 if stage == 'late' else 5)
+            score += coverage() * aggression[color] * (0.55 if stage == 'late' else 0.2)
+            score += heatmap() ** (3 if stage == 'early' else 2 if stage == 'late' else 1) * aggression[not color] * (35 if stage == 'late' else 22.5 if stage == 'early' else 15)
+            score += (control() ** 1.25) * aggression[color] * (1.2 if stage == 'late' else 0.65 if stage == 'early' else 0.45)
             score += minor_piece_bonus() * 15 * aggression[color]
-            score += cse(pawn_structure(), 1.4) * (7.5 if stage == 'late' else 3.75)
-            score += attack_quality() ** 1.2 * aggression[color] * (3.75 if stage == 'late' else 15)
+            score += cse(pawn_structure(), 1.5) * (8.5 if stage == 'late' else 3.75)
+            score += attack_quality() ** 1.3 * aggression[color] * (3.75 if stage == 'late' else 15)
 
             if isinstance(score, complex):
                 print("\nAGG", aggression[color])
@@ -930,7 +983,6 @@ class Computer:
         score = 0
         score += evaluate_player(chess.WHITE)
         score -= evaluate_player(chess.BLACK)
-
         self.save_evaluation(board, score, 0)
 
         return score
@@ -943,7 +995,7 @@ class Computer:
         strategies and stored winning moves:
         1. It first attempts a random opening move.
         2. If no opening move is available, it retrieves a move from the Syzygy 
-        endgame tablebases if possible.
+        endgame tablebases if possible. (MOVED TO BEST_MOVE)
         3. Finally, it checks for a stored winning move for the current board 
         position.
 
@@ -959,13 +1011,6 @@ class Computer:
             print("Using random opening move")
             self.conn.close()
             return opening_best
-
-        # Get Sygyzy best move
-        syg_best = self.best_sygyzy(board)
-        if syg_best is not None:
-            print("Using Sygzy best move")
-            self.conn.close()
-            return syg_best
 
         # Check if there is a stored winning move for the current position
         stored_move = self.get_stored_winning_move(board)
@@ -1008,7 +1053,7 @@ class Computer:
 
         depth = 1
         best_move = None
-        save = True
+        reset = False
 
         # Reset metrics
         self.nodes_explored = 0
@@ -1016,7 +1061,7 @@ class Computer:
         self.alpha_cuts = 0
         self.beta_cuts = 0
         self.prunes = 0
-
+        
         maxmin = max if board.turn == chess.WHITE else min
 
         moves = list(board.legal_moves)  # Convert generator to list for membership checks
@@ -1026,6 +1071,8 @@ class Computer:
         # Sort by the MVV-LVA heuristic
         move_score_map.sort(key=lambda x: self.mvv_lva_score(board, x[0]), reverse=True)
 
+        stage = self.get_game_stage(board.piece_map())
+
         while not self.is_timeup():
 
             print(f"""DEPTH {depth}: """,end='\t')
@@ -1033,9 +1080,22 @@ class Computer:
             move_score_map.sort(key=lambda x: x[1], reverse=board.turn == chess.WHITE)
             moves = [move for move, _ in move_score_map]
 
+            # Get best score: If can_sygyzy and score is not high enough (or is not completely lost) after a shallow search, then use Sygyzy
+            if depth > 3:
+                best_score = maxmin(move_score_map, key=lambda x: x[1])[1]
+                move = self.best_sygyzy(board, best_score)
+                if move is not None:
+                    print("Using Syzygy:",board.san(move))
+                    return move
+
             # Gradually filter out based on the previous scores
-            if depth > 1:
-                turning_point = self._turning_point([score for _, score in move_score_map], threshold=0.5 if depth == 2 else 0.2 if self.get_game_stage(board) != 'late' else 0.35) # Encourage longer thinking in endgames
+            if depth > 2 and not reset:
+                if stage != 'late' and depth > 3:
+                    threshold = 0.2 * (len(list(board.legal_moves)) / len(moves))
+                else:
+                    threshold = 0.25 * (len(list(board.legal_moves)) / len(moves))
+                print("Threshold:",threshold)
+                turning_point = self._turning_point([score for _, score in move_score_map], threshold=threshold)
                 move_score_map = move_score_map[:turning_point]
                 moves = moves[:turning_point]
             print(len(moves),"moves:",[board.san(m) for m in moves])
@@ -1057,48 +1117,27 @@ class Computer:
 
                 # LMR : reduce depth for later moves in the list
                 reduction = 0
-                if depth > 3: # Only apply when the computer has a good idea of the position
+                if depth > 3 and stage != 'late': # Only apply when the computer has a good idea of the position and not in the endgame
                     if i > self._turning_point([score for _, score in move_score_map], threshold=1.5 - (i / len(moves))): # Dynamic threshold based on move number
                         print("LMR",end='\t')
                         reduction += 1
 
                 board.push(move)
+                # Check if the move has already been evaluated
+                score = self.evaluate_from_db(board, depth)
 
-                # vv CURRENTLY UNREACHABLE vv
-                if move not in moves_set:
-                    score = self.evaluate_from_db(board, depth)
-                    if score is None:
-                        board.pop()
-                        continue
-                # ^^ CURRENTLY UNREACHABLE ^^
+                if score is not None:
+                    move_score_dict[move] = score
                 else:
-                    # Check if the move has already been evaluated
-                    score = self.evaluate_from_db(board, depth)
-
-                    if score is not None:
-                        board.pop()
-                        move_score_dict[move] = score
-                        # Update current best if needed
-                        if board.turn == chess.WHITE:
-                            if score > current_best_score:
-                                current_best_score = score
-                                current_best_move = move
-                        else:
-                            if score < current_best_score:
-                                current_best_score = score
-                                current_best_move = move
-                        continue
-                
-                # Minimax
-                score = self.minimax(board, depth - reduction, float('-inf'), float('inf'), original_depth=depth - reduction, heuristic_eliminate=False, use_mvv_lva=True)
+                    score = self.minimax(board, depth - reduction, float('-inf'), float('inf'), original_depth=depth - reduction, heuristic_eliminate=False, use_mvv_lva=True)
                 board.pop()
 
                 if self.is_timeup():
                     print("TIMEUP")
-                    save = False
                     break
 
-                print(f"{board.san(move)} : {score:.2f}",end='\t',flush=True)
+                # Normalise scores as they grow extremely large
+                print(f"{board.san(move)} : {self.normalise_score(score):.2f}",end='\t',flush=True)
                 
                 move_score_dict[move] = score
 
@@ -1114,7 +1153,7 @@ class Computer:
 
                 self.save_evaluation(board, score, depth)
 
-                # Remove moves that lead to checkmates
+                # Remove moves that lead to checkmate
                 if score == self.WORST_SCORE:
                     del move_score_dict[move]
 
@@ -1124,15 +1163,21 @@ class Computer:
             
             print()
 
+            # If all moves lead to checkmate, add every move back into the scope to be searched
             if not move_score_dict:
-                print("No moves left, returning random move")
-                return rnd.choice(list(board.legal_moves))
+                print("All moves lead to checkmate, resetting move scope to all legal moves")
+                # Reset move_score_map to include all legal moves with initial score 0
+                move_score_map = [(move, 0) for move in board.legal_moves]
+                depth = 0
+                reset = True
+                continue
 
             # Update move_score_map from the dictionary for next iteration
             move_score_map = list(move_score_dict.items())
 
             # Terminate early if an immediate win is found
-            if _should_terminate(move_score_map) or all(score == self.WORST_SCORE for _, score in move_score_map):
+            if _should_terminate(move_score_map):
+
                 # Choose best move from current depth
                 best_move = current_best_move if current_best_move is not None else maxmin(move_score_map, key=lambda x: x[1])[0]
 
@@ -1146,19 +1191,10 @@ class Computer:
 
             depth += 1
 
-            if save:
-                self.conn.commit()
+            self.conn.commit()
 
         self.conn.close()
-
-        # Display metrics
-        print(f"""
-        Nodes explored : {self.nodes_explored} | NPS : {self.nodes_explored / (time.time() - self.start_time):.2f}
-        Leaf nodes explored : {self.leaf_nodes_explored} | LNPS : {self.leaf_nodes_explored / (time.time() - self.start_time):.2f}
-        Alpha cutoffs : {self.alpha_cuts}
-        Beta cutoffs : {self.beta_cuts}
-        Total prunes : {self.prunes}
-        """)
+        self.display_metrics()
 
         return best_move
 
@@ -1166,10 +1202,10 @@ class Computer:
     #                     EXTRAS                     #
     ##################################################
 
-    def get_game_stage(self, board: chess.Board) -> str:
+    def get_game_stage(self, piece_map: dict) -> str:
         """Return the current stage of the game."""
 
-        num_pieces = len([piece for piece in board.piece_map().values() if piece.piece_type != chess.PAWN])
+        num_pieces = len([piece for piece in piece_map.values() if piece.piece_type != chess.PAWN])
         if num_pieces >= 12:
             return "early"
         elif num_pieces >= 8:
@@ -1182,6 +1218,37 @@ class Computer:
             return False
         return time.time() - self.start_time > self.timeout
 
+    def normalise_score(self, score: float) -> float:
+        if score == 0:
+            return 0
+        sign = (1 if score > 0 else -1)
+        return sign * math.log(abs(score) + 0.01, 3)
+    
+    def display_metrics(self) -> None:
+        
+        elapsed = time.time() - self.start_time if self.start_time is not None else float("nan")
+        print(f"""
+        Nodes explored : {self.nodes_explored} | NPS : {self.nodes_explored / elapsed:.2f}
+        Leaf nodes explored : {self.leaf_nodes_explored} | LNPS : {self.leaf_nodes_explored / elapsed:.2f}
+        Alpha cutoffs : {self.alpha_cuts}
+        Beta cutoffs : {self.beta_cuts}
+        Total prunes : {self.prunes}
+        """)
+
+    def estimate_pawn_value(self, depth: int) -> float:
+
+        normal_fen = chess.STARTING_FEN
+        fen_without_pawn = "rnbqkbnr/pppppppp/8/8/8/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1"
+
+        normal_score = self.minimax(chess.Board(normal_fen), depth, float('-inf'), float('inf'), original_depth=depth, heuristic_sort=False, heuristic_eliminate=False, use_mvv_lva=True)
+        no_pawn_score = self.minimax(chess.Board(fen_without_pawn), depth, float('-inf'), float('inf'), original_depth=depth, heuristic_sort=False, heuristic_eliminate=False, use_mvv_lva=True)
+
+        self.display_metrics()
+        print("Normal score:", normal_score)
+        print("No pawn score:", no_pawn_score)
+
+        return normal_score - no_pawn_score
+                            
 def profile_evaluation() -> None:
 
     import cProfile
@@ -1209,11 +1276,12 @@ def profile_evaluation() -> None:
         for board in boards:
             c.evaluate(board)
 
-    cProfile.runctx('evaluate_boards()', globals(), locals(), sort='cumulative')
+    cProfile.runctx('evaluate_boards()', globals(), locals(), sort='cumtime')
 
 def main():
 
     FEN = chess.STARTING_FEN
+    # FEN = "4rrk1/p4pp1/1p2p2p/8/1P1Pn3/5qP1/3Q1PBP/R1R4K w - - 2 22"
 
     board = chess.Board(FEN)
     players = [Computer(board.turn), Computer(not board.turn)]
@@ -1221,7 +1289,7 @@ def main():
     while not board.is_game_over():
         print(board,"\n\n")
         player = players[0] if board.turn == chess.WHITE else players[1]
-        move = player.best_move(board, timeout=60)
+        move = player.best_move(board, timeout=30)
         if move is None:
             break
         print("\n\nMove:", board.san(move))
