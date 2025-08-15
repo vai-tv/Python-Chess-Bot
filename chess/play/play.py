@@ -250,8 +250,6 @@ class GameLoop:
                         self.move_logger.print_and_log(f"... {self.game_state.board.san(move)}")
                         
                     self.game_state.push_move(move)
-
-                raise Exception("Test error log")
                     
             self.move_logger.print_and_log(self.game_state.board, "\n\n")
             
