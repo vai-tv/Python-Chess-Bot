@@ -361,8 +361,9 @@ TRACEBACK:
         footer = game_loop.move_logger.footer(game_loop.game_state.board, "ERROR", "ERROR", 
                                       game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.opening_fen)
 
-        with open(f"{error_dir}/error.log", "a") as f:
-            f.write(error_message + "\n\n")
+        if not isinstance(e, KeyboardInterrupt):
+            with open(f"{error_dir}/error.log", "a") as f:
+                f.write(error_message + "\n\n")
         with open(f"{error_dir}/G{game_loop.game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
             f.write(footer)
             f.write("\n\n" + error_message)
