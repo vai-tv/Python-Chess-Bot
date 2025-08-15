@@ -78,6 +78,9 @@ class MoveLogger:
                game_count: int, wins: List[float], players: List[str], fen: str) -> str:
         index = game_count % 2
 
+        # Create a fresh board from the original FEN to ensure consistency
+        fresh_board = chess.Board(fen)
+        
         game = chess.pgn.Game()
         game.headers["Event"] = "Chess Bot Match"
         game.headers["Site"] = "Local"
@@ -90,10 +93,17 @@ class MoveLogger:
         if fen != chess.STARTING_BOARD_FEN:
             game.headers["FEN"] = fen
             
+        # Build the game by applying moves to the fresh board
         node = game
         for move in board.move_stack:
-            node = node.add_variation(move)
-            
+            # Verify the move is legal before adding it
+            if move in fresh_board.legal_moves:
+                fresh_board.push(move)
+                node = node.add_variation(move)
+            else:
+                # If we encounter an illegal move, just skip it
+                break
+                
         return f"""
  ----------- {(f'{players[index].upper()} ({wins[index]})').ljust(10)} VS {(f'({wins[1 - index]}) {players[1 - index].upper()}').rjust(10)} ------------
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
@@ -240,6 +250,8 @@ class GameLoop:
                         self.move_logger.print_and_log(f"... {self.game_state.board.san(move)}")
                         
                     self.game_state.push_move(move)
+
+                raise Exception("Test error log")
                     
             self.move_logger.print_and_log(self.game_state.board, "\n\n")
             
@@ -325,7 +337,7 @@ class ChessGameManager:
         player_map = {module.__name__.split('.')[-1]: module for module in other_bots.__all__}
         return [player_map[bot].Computer for bot in self.args.players]
 
-    def log_error(self, e: Exception, game_state: GameState, game_loop: GameLoop) -> None:
+    def log_error(self, e: Exception, game_loop: GameLoop) -> None:
         # Get traceback info
         tb = traceback.extract_tb(e.__traceback__)[-1]
         filename = tb.filename
@@ -339,6 +351,8 @@ class ChessGameManager:
         os.makedirs(error_dir, exist_ok=True)
 
         error_message = f"""
+
+
 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ERROR: {e.__class__.__name__}
 LOCATION: {filename}:{line_number}
@@ -347,9 +361,14 @@ TRACEBACK:
 
 {traceback.format_exc()}
 """
+
+        footer = game_loop.move_logger.footer(game_loop.game_state.board, "ERROR", "ERROR", 
+                                      game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.game_state.board.fen())
+
         with open(f"{error_dir}/error.log", "a") as f:
             f.write(error_message)
-        with open(f"{error_dir}/G{game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
+        with open(f"{error_dir}/G{game_loop.game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
+            f.write(footer)
             f.write(error_message)
 
         print(f"Game interrupted by error. Error logged to {error_dir}.")
@@ -382,7 +401,7 @@ TRACEBACK:
                 print("\nGame interrupted by user.")
                 sys.exit(0)
             except Exception as e:
-                self.log_error(e, game_state, game_loop)
+                self.log_error(e, game_loop)
 
 
 if __name__ == "__main__":
