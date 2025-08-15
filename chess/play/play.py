@@ -174,6 +174,7 @@ class GameLoop:
         self.players = players
         self.session = f"{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{players[0].upper()}_{players[1].upper()}"
         self.TIME_AT_START = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.opening_fen = game_state.original_fen
         
     def setup_logging(self, game_count: int):
         if not self.log_enabled:
@@ -219,10 +220,10 @@ class GameLoop:
                 
             self.game_state.reset()
             
-            fen = self.game_state.original_fen
+            self.opening_fen = self.game_state.original_fen
             if self.opening_handler:
-                fen = self.opening_handler.play_opening_moves(self.game_state, fen)
-                self.game_state.board = chess.Board(fen)
+                self.opening_fen = self.opening_handler.play_opening_moves(self.game_state, self.opening_fen)
+                self.game_state.board = chess.Board(self.opening_fen)
                 
             if move_log_file is not None:
                 print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
@@ -232,7 +233,7 @@ class GameLoop:
             )
             
             while not self.game_state.is_game_over():
-                for player_idx, player in enumerate(self.game_state.current_players):
+                for player in self.game_state.current_players:
                     self.move_logger.print_and_log(self.game_state.board, "\n\n")
                     
                     if self.game_state.is_game_over():
@@ -258,7 +259,7 @@ class GameLoop:
             
             self.move_logger.print_and_log(
                 self.move_logger.footer(self.game_state.board, winner, winner_name, 
-                                      game_count, self.game_state.wins, self.players, fen)
+                                      game_count, self.game_state.wins, self.players, self.opening_fen)
             )
 
             move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
@@ -335,7 +336,7 @@ class ChessGameManager:
         player_map = {module.__name__.split('.')[-1]: module for module in other_bots.__all__}
         return [player_map[bot].Computer for bot in self.args.players]
 
-    def log_error(self, e: Exception, game_loop: GameLoop) -> None:
+    def log_error(self, e: BaseException, game_loop: GameLoop) -> None:
         # Get traceback info
         tb = traceback.extract_tb(e.__traceback__)[-1]
         filename = tb.filename
@@ -348,26 +349,26 @@ class ChessGameManager:
         error_dir = f"chess/play/logs/{session}"
         os.makedirs(error_dir, exist_ok=True)
 
-        error_message = f"""
-
-
-{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        error_message = f"""{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ERROR: {e.__class__.__name__}
 LOCATION: {filename}:{line_number}
 LINE: {line_content}
 TRACEBACK:
 
 {traceback.format_exc()}
-"""
+""" if not isinstance(e, KeyboardInterrupt) else "Game interrupted by user."
 
         footer = game_loop.move_logger.footer(game_loop.game_state.board, "ERROR", "ERROR", 
-                                      game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.game_state.board.fen())
+                                      game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.opening_fen)
 
         with open(f"{error_dir}/error.log", "a") as f:
-            f.write(error_message)
+            f.write(error_message + "\n\n")
         with open(f"{error_dir}/G{game_loop.game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
             f.write(footer)
-            f.write(error_message)
+            f.write("\n\n" + error_message)
+
+        if not isinstance(e, Exception):
+                sys.exit(0)
 
         print(f"Game interrupted by error. Error logged to {error_dir}.")
         
@@ -395,10 +396,7 @@ TRACEBACK:
         while True:
             try:
                 game_loop.run()
-            except KeyboardInterrupt:
-                print("\nGame interrupted by user.")
-                sys.exit(0)
-            except Exception as e:
+            except BaseException as e:
                 self.log_error(e, game_loop)
 
 
