@@ -53,6 +53,21 @@ class GameState:
     def push_move(self, move: chess.Move):
         self.board.push(move)
 
+    def calculate_material(self) -> float:
+        material = 0.0
+        material_table = {
+            chess.PAWN: 1.0,
+            chess.KNIGHT: 3.0,
+            chess.BISHOP: 3.0,
+            chess.ROOK: 5.0,
+            chess.QUEEN: 9.0
+        }
+        for piece in self.board.piece_map().values():
+            if piece.color == chess.WHITE:
+                material += material_table[piece.piece_type]
+            else:
+                material -= material_table[piece.piece_type]
+        return material
 
 class MoveLogger:
     """Handles logging of game moves and display formatting."""
@@ -253,6 +268,10 @@ class GameLoop:
                     self.game_state.push_move(move)
                     
             self.move_logger.print_and_log(self.game_state.board, "\n\n")
+
+            # Calculate material
+            material = self.game_state.calculate_material()
+            print("Material:",material)
             
             result = self.game_state.get_result()
             winner, winner_name = self.determine_winner(result, game_count)
