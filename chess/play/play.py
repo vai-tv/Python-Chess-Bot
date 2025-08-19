@@ -249,6 +249,8 @@ class GameLoop:
             
             while not self.game_state.is_game_over():
                 for player in self.game_state.current_players:
+                    material = self.game_state.calculate_material()
+                    print("Material:",material)
                     self.move_logger.print_and_log(self.game_state.board, "\n\n")
                     
                     if self.game_state.is_game_over():
@@ -269,10 +271,6 @@ class GameLoop:
                     
             self.move_logger.print_and_log(self.game_state.board, "\n\n")
 
-            # Calculate material
-            material = self.game_state.calculate_material()
-            print("Material:",material)
-            
             result = self.game_state.get_result()
             winner, winner_name = self.determine_winner(result, game_count)
             
