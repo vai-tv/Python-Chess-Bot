@@ -53,14 +53,15 @@ class GameState:
     def push_move(self, move: chess.Move):
         self.board.push(move)
 
-    def calculate_material(self) -> float:
-        material = 0.0
+    def calculate_material(self) -> int:
+        material = 0
         material_table = {
-            chess.PAWN: 1.0,
-            chess.KNIGHT: 3.0,
-            chess.BISHOP: 3.0,
-            chess.ROOK: 5.0,
-            chess.QUEEN: 9.0
+            chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 0
         }
         for piece in self.board.piece_map().values():
             if piece.color == chess.WHITE:
