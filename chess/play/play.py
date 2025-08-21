@@ -158,7 +158,7 @@ class OpeningHandler:
                     move = self.players[0](board_copy.turn).random_opening_move(board_copy)
                     
                 if move is None:
-                    print("No more theory.")
+                    print("No more theory.",end='\t', flush=True)
                     break
                 print(f"{board_copy.san(move)}", end='\t', flush=True)
                 board_copy.push(move)
@@ -270,7 +270,7 @@ class GameLoop:
                         
                     self.game_state.push_move(move)
                     
-            self.move_logger.print_and_log(self.game_state.board, "\n\n")
+            print(self.game_state.board, "\n\n")
 
             result = self.game_state.get_result()
             winner, winner_name = self.determine_winner(result, game_count)
