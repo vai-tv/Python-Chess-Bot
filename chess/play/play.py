@@ -121,6 +121,7 @@ class MoveLogger:
                 break
                 
         return f"""
+        
  ----------- {(f'{players[index].upper()} ({wins[index]})').ljust(10)} VS {(f'({wins[1 - index]}) {players[1 - index].upper()}').rjust(10)} ------------
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
 | WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
