@@ -252,7 +252,7 @@ class GameLoop:
                 for player in self.game_state.current_players:
                     material = self.game_state.calculate_material()
                     print("Material:",material)
-                    self.move_logger.print_and_log(self.game_state.board, "\n\n")
+                    print(self.game_state.board, "\n\n")
                     
                     if self.game_state.is_game_over():
                         break
