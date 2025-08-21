@@ -267,7 +267,7 @@ class GameLoop:
                         return False
                         
                     if self.game_state.get_turn() == chess.WHITE:
-                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}: {self.game_state.board.san(move)}",end='\t\t')
+                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}: {self.game_state.board.san(move).ljust(10)}",end='\t')
                     else:
                         self.move_logger.print_and_log(f"{self.game_state.board.san(move)}")
                         
