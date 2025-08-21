@@ -251,7 +251,10 @@ class GameLoop:
             while not self.game_state.is_game_over():
                 for player in self.game_state.current_players:
                     material = self.game_state.calculate_material()
-                    print("Material:",material)
+                    if self.game_state.get_turn() == chess.WHITE:
+                        print("Material:",material)
+                    else:
+                        print("\nMaterial:",material)
                     print(self.game_state.board, "\n\n")
                     
                     if self.game_state.is_game_over():
@@ -264,9 +267,9 @@ class GameLoop:
                         return False
                         
                     if self.game_state.get_turn() == chess.WHITE:
-                        self.move_logger.print_and_log(f"\n{self.game_state.board.fullmove_number}: {self.game_state.board.san(move)}")
+                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}: {self.game_state.board.san(move)}",end='\t\t')
                     else:
-                        self.move_logger.print_and_log(f"... {self.game_state.board.san(move)}")
+                        self.move_logger.print_and_log(f"{self.game_state.board.san(move)}")
                         
                     self.game_state.push_move(move)
                     
