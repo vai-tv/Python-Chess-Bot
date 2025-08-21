@@ -267,7 +267,7 @@ class GameLoop:
                         return False
                         
                     if self.game_state.get_turn() == chess.WHITE:
-                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}: {self.game_state.board.san(move).ljust(10)}",end='\t')
+                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}: {self.game_state.board.san(move).ljust(10)}",end='')
                     else:
                         self.move_logger.print_and_log(f"{self.game_state.board.san(move)}")
                         
@@ -368,7 +368,8 @@ class ChessGameManager:
         session = game_loop.session
         
         error_dir = f"chess/play/logs/{session}"
-        os.makedirs(error_dir, exist_ok=True)
+        if self.args.log:
+            os.makedirs(error_dir, exist_ok=True)
 
         error_message = f"""{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ERROR: {e.__class__.__name__}
@@ -382,12 +383,13 @@ TRACEBACK:
         footer = game_loop.move_logger.footer(game_loop.game_state.board, "ERROR", "ERROR", 
                                       game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.opening_fen)
 
-        if not isinstance(e, KeyboardInterrupt):
-            with open(f"{error_dir}/error.log", "a") as f:
-                f.write(error_message + "\n\n")
-        with open(f"{error_dir}/G{game_loop.game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
-            f.write(footer)
-            f.write("\n\n" + error_message)
+        if self.args.log:
+            if not isinstance(e, KeyboardInterrupt):
+                with open(f"{error_dir}/error.log", "a") as f:
+                    f.write(error_message + "\n\n")
+            with open(f"{error_dir}/G{game_loop.game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
+                f.write(footer)
+                f.write("\n\n" + error_message)
 
         if not isinstance(e, Exception):
                 sys.exit(0)
