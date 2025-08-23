@@ -27,6 +27,7 @@ class GameState:
         self.wins = [0.0, 0.0]  # White, Black
         self.game_count = 0
         self.current_players = []
+        self.elo_ratings = [1500.0, 1500.0]  # Initialize ELO ratings for both players
         
     def reset(self):
         self.board = chess.Board(self.original_fen)
@@ -69,6 +70,47 @@ class GameState:
                 material -= material_table[piece.piece_type]
         return material
 
+    def calculate_elo(self, result: str, game_count: int) -> dict:
+        """
+        Calculate new ELO ratings based on game result.
+        Returns a dictionary with player names as keys and new ELO ratings as values.
+        """
+
+        color_index = game_count % 2
+
+        K = 32  # Development factor
+        
+        if result == '1-0':  # White wins
+            S_white, S_black = 1, 0
+        elif result == '0-1':  # Black wins
+            S_white, S_black = 0, 1
+        else:  # Draw
+            S_white, S_black = 0.5, 0.5
+        
+        # Get current ELO ratings
+        R_white = self.elo_ratings[color_index]
+        R_black = self.elo_ratings[1 - color_index]
+        
+        # Calculate expected scores
+        E_white = 1 / (1 + 10 ** ((R_black - R_white) / 400))
+        E_black = 1 / (1 + 10 ** ((R_white - R_black) / 400))
+        
+        # Calculate new ELO ratings
+        new_white_elo = R_white + K * (S_white - E_white)
+        new_black_elo = R_black + K * (S_black - E_black)
+        
+        # Update the ELO ratings
+        self.elo_ratings[color_index] = new_white_elo
+        self.elo_ratings[1 - color_index] = new_black_elo
+        
+        return {
+            "white": new_white_elo,
+            "black": new_black_elo,
+            "white_expected": E_white,
+            "black_expected": E_black
+        }
+
+
 class MoveLogger:
     """Handles logging of game moves and display formatting."""
     
@@ -80,18 +122,21 @@ class MoveLogger:
         if self.log_file is not None:
             print(*args, file=self.log_file, **kwargs)
             
-    def header(self, game_count: int, wins: List[float], players: List[str], timeouts: List[float]) -> str:
-        index = game_count % 2
+    def header(self, game_count: int, wins: List[float], players: List[str], timeouts: List[float], elo_ratings: List[float]) -> str:
+        white_info = f"{players[0].upper()} ({wins[0]} | {elo_ratings[0]:.0f})"
+        black_info = f"({wins[1]} | {elo_ratings[1]:.0f}) {players[1].upper()}"
         return f"""
- ----------- {(f'{players[index].upper()} ({wins[index]})').ljust(10)} VS {(f'({wins[1 - index]}) {players[1 - index].upper()}').rjust(10)} ------------
+ ---- {white_info.ljust(17)} VS {black_info.rjust(17)} -----
 | WHITE TIME: {(str(timeouts[0]) + 's').ljust(17)} {("BLACK TIME: " + str(timeouts[1]) + 's').rjust(17)} |
 | GAME BEGINS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(30)} |
  -------------------------------------------------
 """
 
     def footer(self, board: chess.Board, winner: str, winner_name: str, 
-               game_count: int, wins: List[float], players: List[str], fen: str) -> str:
+               game_count: int, wins: List[float], players: List[str], fen: str, elo_ratings: List[float]) -> str:
         index = game_count % 2
+        white_info = f"{players[0].upper()} ({wins[0]} | {elo_ratings[0]:.0f})"
+        black_info = f"({wins[1]} | {elo_ratings[1]:.0f}) {players[1].upper()}"
 
         # Create a fresh board from the original FEN to ensure consistency
         fresh_board = chess.Board(fen)
@@ -103,6 +148,8 @@ class MoveLogger:
         game.headers["Round"] = str(game_count + 1)
         game.headers["White"] = players[index].capitalize()
         game.headers["Black"] = players[1 - index].capitalize()
+        game.headers["WhiteElo"] = str(round(elo_ratings[index]))
+        game.headers["BlackElo"] = str(round(elo_ratings[1 - index]))
         game.headers["Result"] = board.result()
 
         if fen != chess.STARTING_BOARD_FEN:
@@ -121,7 +168,7 @@ class MoveLogger:
                 
         return f"""
         
- ----------- {(f'{players[index].upper()} ({wins[index]})').ljust(10)} VS {(f'({wins[1 - index]}) {players[1 - index].upper()}').rjust(10)} ------------
+ ---- {white_info.ljust(17)} VS {black_info.rjust(17)} -----
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
 | WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
  -------------------------------------------------
@@ -237,10 +284,27 @@ class GameLoop:
                 self.game_state.wins[1 - win_index] += 1
                 winner_name = self.players[1 - win_index].upper()
                 
+            # Calculate and update ELO ratings
+            elo_data = self.game_state.calculate_elo(result, game_count)
+            
+            # Display ELO update information
+            print(f"\nELO Update:")
+            print(f"White ({self.players[0]}): {elo_data['white']:.1f} (expected: {elo_data['white_expected']:.3f})")
+            print(f"Black ({self.players[1]}): {elo_data['black']:.1f} (expected: {elo_data['black_expected']:.3f})")
+            
             return winner, winner_name
         else:
             self.game_state.wins[0] += 0.5
             self.game_state.wins[1] += 0.5
+            
+            # Calculate and update ELO ratings for draw
+            elo_data = self.game_state.calculate_elo(result, game_count)
+            
+            # Display ELO update information
+            print(f"\nELO Update (Draw):")
+            print(f"White ({self.players[0]}): {elo_data['white']:.1f} (expected: {elo_data['white_expected']:.3f})")
+            print(f"Black ({self.players[1]}): {elo_data['black']:.1f} (expected: {elo_data['black_expected']:.3f})")
+            
             return "DRAW", "DRAW"
             
     def play_single_game(self, game_count: int) -> bool:
@@ -264,7 +328,7 @@ class GameLoop:
                 print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
                 
             self.move_logger.print_and_log(
-                self.move_logger.header(game_count, self.game_state.wins, self.players, self.timeouts)
+                self.move_logger.header(game_count, self.game_state.wins, self.players, self.timeouts, self.game_state.elo_ratings)
             )
             
             while not self.game_state.is_game_over():
@@ -301,7 +365,7 @@ class GameLoop:
             
             self.move_logger.print_and_log(
                 self.move_logger.footer(self.game_state.board, winner, winner_name, 
-                                      game_count, self.game_state.wins, self.players, self.opening_fen)
+                                      game_count, self.game_state.wins, self.players, self.opening_fen, self.game_state.elo_ratings)
             )
 
             move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
@@ -403,7 +467,7 @@ TRACEBACK:
 """ if not isinstance(e, KeyboardInterrupt) else "Game interrupted by user."
 
         footer = game_loop.move_logger.footer(game_loop.game_state.board, "ERROR", "ERROR", 
-                                      game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.opening_fen)
+                                      game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.opening_fen, game_loop.game_state.elo_ratings)
 
         if self.args.log:
             if not isinstance(e, KeyboardInterrupt):
