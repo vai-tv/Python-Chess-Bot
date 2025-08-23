@@ -13,7 +13,6 @@ import os
 import sys
 import time
 import traceback
-from collections import deque
 from datetime import datetime
 from typing import List, Optional, Any
 
@@ -81,11 +80,11 @@ class MoveLogger:
         if self.log_file is not None:
             print(*args, file=self.log_file, **kwargs)
             
-    def header(self, game_count: int, wins: List[float], players: List[str], timeout: float) -> str:
+    def header(self, game_count: int, wins: List[float], players: List[str], timeouts: List[float]) -> str:
         index = game_count % 2
         return f"""
  ----------- {(f'{players[index].upper()} ({wins[index]})').ljust(10)} VS {(f'({wins[1 - index]}) {players[1 - index].upper()}').rjust(10)} ------------
-| TIME : {(str(timeout) + ' SECONDS PER MOVE').rjust(40)} |
+| WHITE TIME: {(str(timeouts[0]) + 's').ljust(17)} {("BLACK TIME: " + str(timeouts[1]) + 's').rjust(17)} |
 | GAME BEGINS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(30)} |
  -------------------------------------------------
 """
@@ -181,17 +180,36 @@ class GameLoop:
     """Manages the main game execution loop."""
     
     def __init__(self, game_state: GameState, move_logger: MoveLogger, 
-                 opening_handler: Optional[OpeningHandler], timeout: float,
+                 opening_handler: Optional[OpeningHandler], timeouts: List[float],
                  log_enabled: bool, players: List[str]):
         self.game_state = game_state
         self.move_logger = move_logger
         self.opening_handler = opening_handler
-        self.timeout = timeout
+        self.timeouts = timeouts  # [player1_timeout, player2_timeout]
         self.log_enabled = log_enabled
         self.players = players
         self.session = f"{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{players[0].upper()}_{players[1].upper()}"
         self.TIME_AT_START = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         self.opening_fen = game_state.original_fen
+        
+    def get_timeout_for_player_index(self, player_index: int) -> float:
+        """Get the timeout for the player at the given index."""
+        # Timeouts are always stored as [white_timeout, black_timeout]
+        # When players are swapped, we need to return the appropriate timeout
+        if player_index == 0:
+            # First player in current_players - if game_count is even, this is white
+            # if game_count is odd, this is black
+            if self.game_state.game_count % 2 == 0:
+                return self.timeouts[0]  # White's timeout
+            else:
+                return self.timeouts[1]  # Black's timeout
+        else:
+            # Second player in current_players - if game_count is even, this is black
+            # if game_count is odd, this is white
+            if self.game_state.game_count % 2 == 0:
+                return self.timeouts[1]  # Black's timeout
+            else:
+                return self.timeouts[0]  # White's timeout
         
     def setup_logging(self, game_count: int):
         if not self.log_enabled:
@@ -246,7 +264,7 @@ class GameLoop:
                 print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
                 
             self.move_logger.print_and_log(
-                self.move_logger.header(game_count, self.game_state.wins, self.players, self.timeout)
+                self.move_logger.header(game_count, self.game_state.wins, self.players, self.timeouts)
             )
             
             while not self.game_state.is_game_over():
@@ -262,13 +280,15 @@ class GameLoop:
                         break
                         
                     current_player = player(self.game_state.get_turn())
-                    move = current_player.best_move(self.game_state.board, timeout=self.timeout)
+                    # Determine which player index this is and use their timeout
+                    player_index = self.game_state.current_players.index(player)
+                    move = current_player.best_move(self.game_state.board, timeout=self.get_timeout_for_player_index(player_index))
                     
                     if move is None:
                         return False
                         
                     if self.game_state.get_turn() == chess.WHITE:
-                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}: {self.game_state.board.san(move).ljust(10)}",end='')
+                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}. {self.game_state.board.san(move).ljust(10)}",end='')
                     else:
                         self.move_logger.print_and_log(f"{self.game_state.board.san(move)}")
                         
@@ -319,19 +339,20 @@ class ChessGameManager:
             '--player',
             nargs=2,
             choices=list(player_map.keys()),
-            help="Select the players to play with.",
+            help="Select the players to play with (player1 player2).",
             default=['main', 'main']
         )
         parser.add_argument(
             '-t', '--timeout', '--time',
+            nargs=2,
             type=float,
-            help="Set the timeout for each player in seconds.",
-            default=10.0
+            help="Set the timeout for each player in seconds (player1 player2).",
+            default=[10.0, 10.0]
         )
         parser.add_argument(
             '-l', '--log',
             action='store_true',
-            help="Enable logging of the game moves to a file.",
+            help="Enable logging of the game moves to a file when provided.",
             default=False
         )
         parser.add_argument(
@@ -413,7 +434,7 @@ TRACEBACK:
             game_state=game_state,
             move_logger=move_logger,
             opening_handler=opening_handler,
-            timeout=self.args.timeout,
+            timeouts=self.args.timeout,
             log_enabled=self.args.log,
             players=self.args.players
         )
