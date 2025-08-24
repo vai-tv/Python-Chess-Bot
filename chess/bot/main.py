@@ -1,7 +1,5 @@
 """
-This bot is similar to 1.7.1b-simple, but using 1.7's evaluation function with major optimisations.
-
-Errors in the pruning during minimax have also been fixed, reducing blunders.
+1.7.3 has a stronger focus on better, faster pruning and optimisation in places over than the evaluation function.
 """
 
 import chess
@@ -16,7 +14,7 @@ from typing import Hashable
 
 setrecursionlimit(int(1e6))
 
-__version__ = '1.7.2'
+__version__ = '1.7.3'
 
 class Computer:
 
@@ -43,12 +41,15 @@ class Computer:
         # Evaluation caches
         self.transposition_table: dict[Hashable, float] = {}
         self.pawn_hash_cache: dict[tuple[int, int], float] = {}
+        
+        # History heuristic table
+        self.history_table: dict[chess.Move, int] = {}
 
     ##################################################
     #            OPENING BOOKS AND syzygy            #
     ##################################################
 
-    syzygy_URL = "https://tablebase.lichess.ovh/standard?fen="
+    SYZYGY_URL = "https://tablebase.lichess.ovh/standard?fen="
     OPENING_URL = "https://explorer.lichess.ovh/master?fen="
 
     OPENING_LEAVE_CHANCE = 0.05  # Chance to leave the opening book
@@ -82,7 +83,7 @@ class Computer:
         fen = board.fen()
         fen_encoded = urllib.parse.quote(fen)
 
-        url = self.syzygy_URL + fen_encoded
+        url = self.SYZYGY_URL + fen_encoded
 
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
@@ -172,47 +173,6 @@ class Computer:
     ##################################################
     #                   HEURISTICS                   #
     ##################################################
-
-    def _score_weak_heuristic(self, board: chess.Board, weak_depth: int = 0) -> list[tuple[chess.Move, float]]:
-        """
-        Evaluate and score each legal move from the current board position using the Minimax algorithm 
-        without heuristic sorting or elimination.
-
-        :param board: The current state of the chess board.
-        :type board: chess.Board
-        :param weak_depth: The depth to search in the Minimax algorithm.
-        :type weak_depth: int
-        :return: A list of tuples containing legal moves and their corresponding scores.
-        :rtype: list[tuple[chess.Move, float]]
-        """
-
-        move_score_map: list[tuple[chess.Move, float]] = []
-
-        for move in board.legal_moves:
-            board.push(move)
-            score = self.minimax(board, weak_depth, float('-inf'), float('inf'), heuristic_sort=False, heuristic_eliminate=False)
-            board.pop()
-            move_score_map.append((move, score))
-        
-        return move_score_map
-
-    def weak_heuristic_moves(self, board: chess.Board, depth: int = 0) -> list[chess.Move]:
-        """
-        Generate a list of moves in weak heuristic order.
-
-        :param board: The current state of the board
-        :type board: chess.Board
-        :param depth: The depth to search in the Minimax algorithm
-        :type depth: int
-        :return: A list of moves in weak heuristic order
-        :rtype: list[chess.Move]
-        """
-
-        move_score_map = self._score_weak_heuristic(board, depth)
-        
-        # Sort moves by score
-        sorted_moves = sorted(move_score_map, key=lambda x: x[1], reverse=board.turn == chess.WHITE)
-        return [move for move, _ in sorted_moves]
     
     def _turning_point(self, scores: list[float], threshold: float=0.25) -> int:
         """
@@ -245,30 +205,6 @@ class Computer:
                 return i + 1
         return len(scores)
 
-    def select_wh_moves(self, board: chess.Board, depth: int = 0) -> list[chess.Move]:
-        """
-        Select some moves worth exploring based on a weak heuristic.
-
-        :param board: The current state of the board
-        :type board: chess.Board
-        :param depth: The depth to search in the Minimax algorithm
-        :type depth: int
-        :return: A list of moves in weak heuristic order
-        :rtype: list[chess.Move]
-        """
-
-        move_score_map = self._score_weak_heuristic(board, depth)
-        
-        # Sort moves by score
-        sorted_moves = sorted(move_score_map, key=lambda x: x[1], reverse=board.turn == chess.WHITE)
-        
-        # Decide turning point (elbow function)
-        scores = [score for _, score in sorted_moves]
-        cutoff_index = self._turning_point(scores)
-        selected_moves = [move for move, _ in sorted_moves[:cutoff_index+1]]
-
-        return selected_moves
-
     def mvv_lva_score(self, board: chess.Board, move: chess.Move) -> float:
         """
         Calculate the MVV-LVA (Most Valuable Victim - Least Valuable Attacker) score for a move.
@@ -289,6 +225,44 @@ class Computer:
         # Higher score for capturing more valuable victim with less valuable attacker
         return (victim_value * 10) - attacker_value
 
+    def see_score(self, board: chess.Board, move: chess.Move) -> float:
+        """
+        Static Exchange Evaluation (SEE) score for a move.
+        Returns the expected material gain from the exchange.
+        
+        :param board: The current state of the board
+        :param move: The move to evaluate
+        :return: SEE score (positive for good captures, negative for bad ones)
+        """
+        if not board.is_capture(move):
+            return 0
+            
+        from_sq = move.from_square
+        to_sq = move.to_square
+        
+        # Get the pieces involved
+        attacker = board.piece_type_at(from_sq)
+        victim = board.piece_type_at(to_sq)
+        
+        if attacker is None or victim is None:
+            return 0
+            
+        # Base gain is victim value minus attacker value
+        gain = self.MATERIAL[victim] - self.MATERIAL[attacker]
+        
+        # Simple approximation - in a real implementation, you'd do a full SEE
+        # For now, we'll use a simplified version that considers the piece values
+        
+        # Check if the capture is defended
+        defenders = board.attackers(not board.turn, to_sq)
+        attackers = board.attackers(board.turn, to_sq)
+        
+        # If there are more defenders than attackers, it might be a bad capture
+        if len(defenders) > len(attackers):
+            gain -= self.MATERIAL[attacker] * 0.5
+            
+        return gain
+
     def mvv_lva_ordering(self, board: chess.Board, moves: list[chess.Move]) -> list[chess.Move]:
         """
         Order moves using MVV-LVA heuristic.
@@ -298,6 +272,19 @@ class Computer:
         :return: List of moves ordered by MVV-LVA score descending
         """
         scored_moves = [(move, self.mvv_lva_score(board, move)) for move in moves]
+        scored_moves.sort(key=lambda x: x[1], reverse=True)
+
+        return [move for move, _ in scored_moves]
+
+    def see_ordering(self, board: chess.Board, moves: list[chess.Move]) -> list[chess.Move]:
+        """
+        Order moves using SEE (Static Exchange Evaluation) heuristic.
+
+        :param board: The current state of the board
+        :param moves: List of moves to order
+        :return: List of moves ordered by SEE score descending
+        """
+        scored_moves = [(move, self.see_score(board, move)) for move in moves]
         scored_moves.sort(key=lambda x: x[1], reverse=True)
 
         return [move for move, _ in scored_moves]
@@ -348,7 +335,7 @@ class Computer:
 
     ESTIMATED_PAWN_VALUE = 10000
 
-    def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, original_depth: int = 0, heuristic_sort: bool = True, heuristic_eliminate: bool = True, use_mvv_lva: bool = False) -> float:
+    def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, original_depth: int = 0, use_mvv_lva: bool = False) -> float:
         """
         Evaluate the best move to make using the Minimax algorithm.
 
@@ -362,10 +349,6 @@ class Computer:
         :type beta: float
         :param original_depth: The original depth of the search
         :type original_depth: int
-        :param heuristic_sort: Whether to sort moves by heuristic score
-        :type heuristic_sort: bool
-        :param heuristic_eliminate: Whether to eliminate moves with low heuristic scores
-        :type heuristic_eliminate: bool
         :param use_mvv_lva: Whether to order moves using MVV-LVA heuristic
         :type use_mvv_lva: bool
         :return: The best score possible for the maximizing player, or None if timeout occurred
@@ -383,22 +366,21 @@ class Computer:
             # If checkmate, return mate score adjusted for distance
             self.leaf_nodes_explored += 1
             return float('-inf') if board.turn == chess.WHITE else float('inf')
-        elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.is_repetition(count=3):
+        elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.is_repetition(count=2):
             self.leaf_nodes_explored += 1
             return 0
 
         # Leaf node evaluation
         if depth == 0:
-            self.leaf_nodes_explored += 1
             return self.evaluate(board)
 
         is_maximizing = board.turn == chess.WHITE
         best_score = float('-inf') if is_maximizing else float('inf')
 
         # Futility pruning - only at frontier nodes and when not in check
-        if depth <= 2 and not board.is_check():
+        if depth <= 3:
             static_eval = self.evaluate(board)
-            margin = self.ESTIMATED_PAWN_VALUE * 1.5  # More conservative margin
+            margin = self.ESTIMATED_PAWN_VALUE * depth * 1.5
             
             if is_maximizing and static_eval + margin < alpha:
                 self.alpha_cuts += 1
@@ -409,23 +391,7 @@ class Computer:
                 self.prunes += 1
                 return static_eval - margin
 
-        # Null Move Pruning - more conservative implementation
-        if depth >= 3 and not board.is_check() and not any(board.is_capture(move) for move in board.legal_moves):
-            R = 2  # More conservative reduction
-            board.push(chess.Move.null())
-            null_score = -self.minimax(board, depth - 1 - R, -beta, -alpha, 
-                                    original_depth=original_depth, 
-                                    heuristic_sort=heuristic_sort, 
-                                    heuristic_eliminate=heuristic_eliminate, 
-                                    use_mvv_lva=use_mvv_lva)
-            board.pop()
-            
-            if null_score >= beta:
-                self.beta_cuts += 1
-                self.prunes += 1
-                return null_score
-
-        # Move ordering
+        # Move ordering with history heuristic
         legal_moves = list(board.legal_moves)
         
         # Get killer moves for current depth
@@ -437,20 +403,57 @@ class Computer:
         killer_moves_in_legals = [move for move in killer_moves if move in legal_moves and move not in capture_moves]
         quiet_moves = [move for move in legal_moves if move not in capture_moves and move not in killer_moves_in_legals]
         
-        # Order captures with MVV-LVA if enabled
-        if use_mvv_lva and capture_moves:
-            capture_moves = self.mvv_lva_ordering(board, capture_moves)
+        # Order captures with SEE (more accurate than MVV-LVA)
+        if capture_moves:
+            capture_moves = self.see_ordering(board, capture_moves)
         
-        # Combine moves: captures first, then killer moves, then quiet moves
+        # Order quiet moves using history heuristic
+        quiet_moves.sort(key=lambda move: self.history_table.get(move, 0), reverse=True)
+        
+        # Combine moves: captures first, then killer moves, then quiet moves ordered by history
         ordered_moves = capture_moves + killer_moves_in_legals + quiet_moves
 
-        for move in ordered_moves:
+        # Check Extensions
+        extension = 0
+        if board.is_check():
+            extension = 1  # Extend search depth when in check
+
+        # Null Move Pruning - more conservative implementation
+        if depth >= 3 and not board.is_check() and not any(board.is_capture(move) for move in board.legal_moves):
+            R = 2  # More conservative reduction
+            board.push(chess.Move.null())
+            null_score = -self.minimax(board, depth - 1 - R, -beta, -alpha, 
+                                    original_depth=original_depth, 
+                                    use_mvv_lva=use_mvv_lva)
+            board.pop()
+            
+            if null_score >= beta:
+                self.beta_cuts += 1
+                self.prunes += 1
+                return null_score
+
+
+        # Principal Variation Search (PVS)
+        for i, move in enumerate(ordered_moves):
             board.push(move)
-            score = self.minimax(board, depth - 1, alpha, beta, 
-                                original_depth=original_depth,
-                                heuristic_sort=heuristic_sort,
-                                heuristic_eliminate=heuristic_eliminate,
-                                use_mvv_lva=use_mvv_lva)
+            
+            # Use PVS: full search for first move, null-window for others
+            if i == 0:
+                score = self.minimax(board, depth - 1 + extension, alpha, beta, 
+                                    original_depth=original_depth + extension,
+                                    use_mvv_lva=use_mvv_lva)
+            else:
+                # Null-window search
+                score = self.minimax(board, depth - 1 + extension, alpha, alpha + 1, 
+                                    original_depth=original_depth + extension,
+                                    use_mvv_lva=use_mvv_lva)
+                
+                # If null-window search fails high, do full search
+                if (is_maximizing and score > alpha) or (not is_maximizing and score < beta):
+                    score = self.minimax(board, depth - 1 + extension, alpha, beta, 
+                                        original_depth=original_depth + extension,
+                                        use_mvv_lva=use_mvv_lva)
+            
             board.pop()
             
             if is_maximizing:
@@ -461,6 +464,12 @@ class Computer:
                 if score < best_score:
                     best_score = score
                 beta = min(beta, best_score)
+
+            # Update history heuristic
+            if move in self.history_table:
+                self.history_table[move] += 1
+            else:
+                self.history_table[move] = 1
 
             # Alpha-beta pruning
             if beta <= alpha:
@@ -490,10 +499,13 @@ class Computer:
         :rtype: float
         """
 
+        self.leaf_nodes_explored += 1
+
         transposition_key = board._transposition_key()
         if transposition_key in self.transposition_table:
             self.cache_hits += 1
             return self.transposition_table[transposition_key]
+
 
         def cse(x: float, y: float) -> float:
             """Complex safe exponentiation."""
@@ -1041,7 +1053,7 @@ class Computer:
                         reduction += 1
 
                 board.push(move)
-                score = self.minimax(board, depth - reduction, float('-inf'), float('inf'), original_depth=depth - reduction, heuristic_eliminate=False, use_mvv_lva=True)
+                score = self.minimax(board, depth - reduction, float('-inf'), float('inf'), original_depth=depth - reduction, use_mvv_lva=True)
                 board.pop()
 
                 if self.is_timeup():
@@ -1163,8 +1175,8 @@ class Computer:
 
             print("DEPTH",i + 1)
 
-            normal_score = c.minimax(chess.Board(normal_fen), i + 1, float('-inf'), float('inf'), original_depth=i + 1, heuristic_sort=False, heuristic_eliminate=False, use_mvv_lva=True)
-            no_pawn_score = c.minimax(chess.Board(fen_without_pawn), i + 1, float('-inf'), float('inf'), original_depth=i + 1, heuristic_sort=False, heuristic_eliminate=False, use_mvv_lva=True)
+            normal_score = c.minimax(chess.Board(normal_fen), i + 1, float('-inf'), float('inf'), original_depth=i + 1, use_mvv_lva=True)
+            no_pawn_score = c.minimax(chess.Board(fen_without_pawn), i + 1, float('-inf'), float('inf'), original_depth=i + 1, use_mvv_lva=True)
 
             c.display_metrics()
             print("Normal score:", normal_score)
