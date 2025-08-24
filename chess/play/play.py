@@ -186,7 +186,8 @@ class OpeningHandler:
     opening_path = os.path.join(os.path.dirname(__file__), "openings.json")
 
     if not os.path.exists(opening_path):
-        open(opening_path, "w").close()
+        with open(opening_path, "w") as f:
+            json.dump({}, f)
 
     openings: dict[str, list[str]] = json.load(open(opening_path))
     
