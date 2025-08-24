@@ -8,11 +8,15 @@ import argparse
 import chess
 import chess.pgn
 import chess.engine
+import json
 import linecache
 import os
+import random as rnd
+import requests
 import sys
 import time
 import traceback
+import urllib.parse
 from datetime import datetime
 from typing import List, Optional, Any
 
@@ -178,17 +182,86 @@ class MoveLogger:
 
 class OpeningHandler:
     """Handles opening moves with Stockfish evaluation."""
+
+    opening_path = os.path.join(os.path.dirname(__file__), "openings.json")
+    openings: dict[str, list[str]] = json.load(open(opening_path))
+    
+    base_new_opening_chance = 0.75
     
     def __init__(self, players: List[Any], opening_moves: int):
         self.players = players
         self.opening_moves = opening_moves
+
+    def opening_query(self, board: chess.Board) -> dict:
+        """
+        Query the opening book for the best move in the given board position.
+
+        Args:
+            board (chess.Board): The chess board position to query.
+
+        Returns:
+            dict: The JSON response from the opening book server if successful.
+
+        Raises:
+            requests.RequestException: If the request to the opening book server fails.
+        """
+
+        fen = board.fen()
+        fen_encoded = urllib.parse.quote(fen)
+
+        url = "https://explorer.lichess.ovh/master?fen=" + fen_encoded
+
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 429:
+                time.sleep(2)
+                return self.opening_query(board)
+            else:
+                raise requests.RequestException(f"Request to opening book server failed with status code {response.status_code}")
+
+        except requests.ConnectionError: # If max retries, no response etc, ignore
+            return {"moves": []}
+
+    def random_opening_move(self, board: chess.Board) -> chess.Move | None:
+        """
+        Get a random move from the opening book for the given board position.
+
+        Args:
+            board (chess.Board): The chess board position to get a random opening move for.
+
+        Returns:
+            chess.Move: A random move from the opening book.
+            None: If no moves are available in the opening book or the opening leave chance is not met.
+        """
+
+        response = self.opening_query(board)
+        if "moves" in response and response["moves"]:
+            moves = response["moves"]
+
+            weights = [move["white"] + move["black"] + move["draws"] for move in moves]
+            chosen_move = rnd.choices(moves, weights=weights, k=1)[0]
+            return chess.Move.from_uci(chosen_move["uci"])
+        return None
         
     def play_opening_moves(self, game_state: GameState, fen: str) -> str:
-        if not hasattr(self.players[0], 'random_opening_move'):
-            return fen
-            
         if self.opening_moves == 0:
             return fen
+        
+        if str(self.opening_moves) not in self.openings:
+            self.openings[str(self.opening_moves)] = []
+        openings = self.openings[str(self.opening_moves)]
+
+        # b / sqrt(x) where b is the base opening chance and x is the number of openings
+        # Exponential decay formula to discourage new openings when there are already many
+        dynamic_opening_chance = self.base_new_opening_chance / (max(len(openings), 1)) ** 0.5
+        
+        # Get opening from opening book
+        if rnd.random() > dynamic_opening_chance and openings:
+            opening = rnd.choice(openings)
+            print("Reading from opening book.")
+            return opening
             
         board = game_state.board.copy()
         
@@ -196,13 +269,7 @@ class OpeningHandler:
             board_copy = board.copy()
             
             for _ in range(self.opening_moves * 2):
-                move = self.players[0](board_copy.turn).random_opening_move(board_copy)
-                start = time.time()
-                
-                while move is None:
-                    if time.time() - start > 10:
-                        break
-                    move = self.players[0](board_copy.turn).random_opening_move(board_copy)
+                move = self.random_opening_move(board_copy)
                     
                 if move is None:
                     print("No more theory.",end='\t', flush=True)
@@ -219,6 +286,14 @@ class OpeningHandler:
                 continue
             if abs(score) < 20:
                 print(f"\nPosition is close to equal, score is {score}. Continuing.")
+
+                # Save to the opening book
+                opening = board_copy.fen()
+                openings.append(opening)
+                self.openings[str(self.opening_moves)] = openings
+
+                json.dump(self.openings, open(self.opening_path, "w"), indent=4)
+
                 return board_copy.fen()
             print(f"\nPosition is not close to equal, score is {score}.")
             
