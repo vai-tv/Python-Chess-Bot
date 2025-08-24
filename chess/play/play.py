@@ -184,6 +184,10 @@ class OpeningHandler:
     """Handles opening moves with Stockfish evaluation."""
 
     opening_path = os.path.join(os.path.dirname(__file__), "openings.json")
+
+    if not os.path.exists(opening_path):
+        open(opening_path, "w").close()
+
     openings: dict[str, list[str]] = json.load(open(opening_path))
     
     base_new_opening_chance = 0.75
