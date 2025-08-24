@@ -262,6 +262,8 @@ class OpeningHandler:
             opening = rnd.choice(openings)
             print("Reading from opening book.")
             return opening
+        else:
+            print(f"Random float is below {(dynamic_opening_chance * 100):.2f}%, creating new opening.")
             
         board = game_state.board.copy()
         
