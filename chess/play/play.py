@@ -191,8 +191,6 @@ class OpeningHandler:
 
     openings: dict[str, list[str]] = json.load(open(opening_path))
     
-    base_new_opening_chance = 0.75
-    
     def __init__(self, players: List[Any], opening_moves: int):
         self.players = players
         self.opening_moves = opening_moves
@@ -258,9 +256,9 @@ class OpeningHandler:
             self.openings[str(self.opening_moves)] = []
         openings = self.openings[str(self.opening_moves)]
 
-        # b / sqrt(x) where b is the base opening chance and x is the number of openings
+        # 1 / sqrt(x)
         # Exponential decay formula to discourage new openings when there are already many
-        dynamic_opening_chance = self.base_new_opening_chance / (max(len(openings), 1)) ** 0.5
+        dynamic_opening_chance = 1 / (max(len(openings), 1)) ** 0.5
         
         # Get opening from opening book
         if rnd.random() > dynamic_opening_chance and openings:
