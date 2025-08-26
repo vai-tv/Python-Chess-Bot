@@ -67,11 +67,12 @@ class GameState:
         return self.board.is_game_over()
         
     def get_result(self) -> str:
-        if self.remaining_time[0] <= 0:
+        # Check for timeout only if time is not infinite
+        if self.remaining_time[0] != float('inf') and self.remaining_time[0] <= 0:
             if self.board.has_insufficient_material(chess.BLACK):
                 return '1/2-1/2'
             return '0-1'
-        elif self.remaining_time[1] <= 0:
+        elif self.remaining_time[1] != float('inf') and self.remaining_time[1] <= 0:
             if self.board.has_insufficient_material(chess.WHITE):
                 return '1/2-1/2'
             return '1-0'
@@ -159,17 +160,21 @@ class MoveLogger:
         white_base, white_bonus = timeouts[0]
         black_base, black_bonus = timeouts[1]
 
-        if round(white_base) == white_base:
-            white_base = int(white_base)
-        if round(white_bonus) == white_bonus:
-            white_bonus = int(white_bonus)
-        if round(black_base) == black_base:
-            black_base = int(black_base)
-        if round(black_bonus) == black_bonus:
-            black_bonus = int(black_bonus)
+        # Handle infinite timeout display
+        def format_time_value(time_val: float) -> str:
+            if time_val == float('inf'):
+                return "inf"
+            if round(time_val) == time_val:
+                return str(int(time_val))
+            return str(time_val)
         
-        white_time_str = f"{white_base}+{white_bonus}"
-        black_time_str = f"{black_base}+{black_bonus}"
+        white_base_str = format_time_value(white_base)
+        white_bonus_str = format_time_value(white_bonus)
+        black_base_str = format_time_value(black_base)
+        black_bonus_str = format_time_value(black_bonus)
+        
+        white_time_str = f"{white_base_str}+{white_bonus_str}"
+        black_time_str = f"{black_base_str}+{black_bonus_str}"
         
         return f"""
  ---- {white_info.ljust(17)} VS {black_info.rjust(17)} -----
@@ -480,8 +485,8 @@ class GameLoop:
                     move_end_time = time.time()
                     move_time = move_end_time - move_start_time
 
-                    # Resign if time runs out
-                    if self.game_state.remaining_time[player_index] <= 0:
+                    # Resign if time runs out (only check if time is not infinite)
+                    if self.game_state.remaining_time[player_index] != float('inf') and self.game_state.remaining_time[player_index] <= 0:
                         game_over = True
                         break
 
@@ -542,17 +547,23 @@ class ChessGameManager:
         - d is bonus time for player 2
         
         Also supports backward compatibility with "a c" format.
+        Supports "inf" for infinite timeout.
         """
         
+        def parse_timeout_string(timeout_str: str) -> Tuple[float, float]:
+            """Parse a single timeout string, handling 'inf' values."""
+            if "+" in timeout_str:
+                base_str, bonus_str = timeout_str.split('+')
+                base = float('inf') if base_str.lower() == 'inf' else float(base_str)
+                bonus = float('inf') if bonus_str.lower() == 'inf' else float(bonus_str)
+                return (base, bonus)
+            else:
+                base = float('inf') if timeout_str.lower() == 'inf' else float(timeout_str)
+                return (base, 0.0)
+        
         timeoutstr1, timeoutstr2 = timeout
-        if "+" in timeoutstr1:
-            timeout1 = [(float(timeoutstr1.split('+')[0]), float(timeoutstr1.split('+')[1]))]
-        else:
-            timeout1 = [(float(timeoutstr1), 0.0)]
-        if "+" in timeoutstr2:
-            timeout2 = [(float(timeoutstr2.split('+')[0]), float(timeoutstr2.split('+')[1]))]
-        else:
-            timeout2 = [(float(timeoutstr2), 0.0)]
+        timeout1 = [parse_timeout_string(timeoutstr1)]
+        timeout2 = [parse_timeout_string(timeoutstr2)]
         return timeout1 + timeout2
 
     
@@ -574,8 +585,8 @@ class ChessGameManager:
             '-t', '--timeout', '--time',
             type=str,
             nargs=2,
-            help="Set the timeout for each player in format 'a+b c+d' (base+bonus for each player) or 'a c' for backward compatibility.",
-            default="10.0+0.0 10.0+0.0"
+            help="Set the timeout for each player in format 'a+b c+d' (base+bonus for each player) or 'a c' for backward compatibility. 'inf' to disable timeout.",
+            default="inf inf"
         )
         parser.add_argument(
             '-l', '--log',
