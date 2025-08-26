@@ -1,20 +1,23 @@
 """
-1.7.3 has a stronger focus on better, faster pruning and optimisation in places over than the evaluation function.
+1.7.3 has a stronger focus on better, faster pruning and optimisation in places other than the evaluation function.
+
+This computer marks the first version which includes cutechess and traditional timeout implementation.
 """
 
 import chess
 import collections
 import random as rnd
 import requests
+import sys
 import time
 import urllib.parse
 
-from sys import setrecursionlimit
 from typing import Hashable
 
-setrecursionlimit(int(1e6))
+sys.setrecursionlimit(int(1e6))
 
 __version__ = '1.7.3'
+NAME = 'XXIEvo'
 
 class Computer:
 
@@ -54,16 +57,10 @@ class Computer:
 
     OPENING_LEAVE_CHANCE = 0.05  # Chance to leave the opening book
 
-    def can_syzygy(self, board: chess.Board, best_score: float) -> bool:
+    def can_syzygy(self, board: chess.Board) -> bool:
         num_pieces = bin(board.occupied).count('1')
         if num_pieces > 7:
             return False
-
-        win_threshold = 100
-        lose_threshold = -50
-        if self.normalise_score(best_score) >= win_threshold or self.normalise_score(best_score) <= lose_threshold:
-            return False
-
         return True
 
     def syzygy_query(self, board: chess.Board) -> dict:
@@ -88,27 +85,44 @@ class Computer:
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             return response.json()
+        elif response.status_code == 429:
+            time.sleep(3)
+            return self.syzygy_query(board)
         else:
             raise requests.RequestException(f"Request to Syzygy tablebase server failed with status code {response.status_code}")
 
-    def best_syzygy(self, board: chess.Board, best_score: float) -> chess.Move | None:
+    def best_syzygy(self, board: chess.Board) -> chess.Move | None:
         """
         Get the best move from the Syzygy tablebase server for the given board position.
 
         Args:
             board (chess.Board): The chess board position to get the best move for.
-            best_score (float): The best score for the board position.
 
         Returns:
             chess.Move: The best move from the Syzygy tablebase server.
             None: If no best move is found.
         """
 
-        if not self.can_syzygy(board, best_score):
+        if not self.can_syzygy(board):
             return None
 
         response = self.syzygy_query(board)
-        return chess.Move.from_uci(response["moves"][0]["uci"])
+
+        category = response["category"]
+        if category == "win":
+            anticategory = "loss"
+        elif category == "loss":
+            anticategory = "win"
+        else:
+            anticategory = "draw"
+        best_moves = [move for move in response["moves"] if move["category"] == anticategory]
+
+        if category in ["win", "draw"]:
+            best_move = best_moves[0]
+        else: # If loss, it's best to think for yourself to survive the longest
+            return None
+
+        return chess.Move.from_uci(best_move["uci"])
 
     def opening_query(self, board: chess.Board) -> dict:
         """
@@ -174,36 +188,139 @@ class Computer:
     #                   HEURISTICS                   #
     ##################################################
     
-    def _turning_point(self, scores: list[float], threshold: float=0.25) -> int:
+    def _turning_point(self, scores: list[float], threshold: float=0.25, 
+                      context: dict | None = None) -> int:
         """
-        Find the index of the 'turning point' in sorted scores by identifying the first gap that meets the threshold.
-
-        The method takes a sorted list of scores as input and returns the index after the first gap that is greater than
-        a threshold fraction of the score range.
-
-        :param scores: A sorted list of scores
-        :param threshold: The threshold fraction of the score range
-        :return: The index of the turning point or len(scores) if no qualifying gap is found
+        Find the optimal turning point in sorted scores using statistical analysis and adaptive thresholds.
+        
+        The method identifies the most significant quality drop in move scores and returns the index
+        after that drop, effectively pruning lower-quality moves while preserving good options.
+        
+        :param scores: A sorted list of scores (descending for white, ascending for black)
+        :param threshold: Base threshold fraction for relative gap significance
+        :param context: Optional context dictionary with search_depth, move_count, game_stage
+        :return: The index of the turning point or len(scores) if no significant gap is found
         """
-
+        
         if not scores:
             return -1
         if len(scores) == 1:
             return 1
-
+            
+        # Default context values if not provided
+        if context is None:
+            context = {'search_depth': 3, 'move_count': len(scores), 'game_stage': self.stageMIDDLE}
+        
+        search_depth = context.get('search_depth', 3)
+        move_count = context.get('move_count', len(scores))
+        game_stage = context.get('game_stage', self.stageMIDDLE)
+        
+        # Early termination for very small move sets
+        if len(scores) <= 3:
+            return len(scores)
+            
+        # Calculate basic statistics
         score_range = max(scores) - min(scores)
         if score_range == 0:
-            return 1
-
+            return len(scores)  # All moves equal, keep all
+            
+        mean_score = sum(scores) / len(scores)
+        
+        # Calculate standard deviation for statistical analysis
+        variance = sum((score - mean_score) ** 2 for score in scores) / len(scores)
+        std_dev = variance ** 0.5 if variance > 0 else 1.0
+        
+        # Adaptive threshold parameters based on context
+        depth_factor = max(0.5, min(2.0, search_depth / 3.0))  # More aggressive at higher depths
+        move_count_factor = max(0.3, min(1.5, 10.0 / move_count))  # More aggressive with more moves
+        
+        # Game stage adjustments
+        stage_factors = {
+            self.stageEARLY: 1.2,   # More conservative in opening
+            self.stageMIDDLE: 1.0,   # Standard pruning
+            self.stageLATE: 0.8      # More aggressive in endgame
+        }
+        stage_factor = stage_factors.get(game_stage, 1.0)
+        
+        # Combined adaptive threshold
+        adaptive_threshold = threshold * depth_factor * move_count_factor * stage_factor
+        
+        # Find all significant gaps
+        significant_gaps = []
         for i in range(len(scores) - 1):
             gap = abs(scores[i] - scores[i + 1])
-            # Cut the gap if it is at least 50 points wide
-            if gap > 50 * self.ESTIMATED_PAWN_VALUE:
-                return i + 1
-            # Check if the gap is greater than the threshold and greater than 100 centipawns
-            if gap / score_range >= threshold and gap > self.ESTIMATED_PAWN_VALUE:
-                return i + 1
-        return len(scores)
+            
+            # Calculate gap significance using multiple criteria
+            relative_gap = gap / score_range if score_range > 0 else 0
+            z_score_gap = gap / std_dev if std_dev > 0 else 0
+            position_factor = 1.0 - (i / len(scores))  # Weight gaps earlier in list more
+            
+            # Combined significance score
+            gap_significance = (
+                relative_gap * 0.4 +          # Relative gap importance
+                min(z_score_gap, 3.0) * 0.3 +  # Statistical significance (capped)
+                position_factor * 0.3          # Position weighting
+            )
+            
+            # Absolute gap threshold (much more reasonable than 100 centipawns)
+            absolute_threshold = 500.0  # 5 centipawns in normalized terms
+            
+            if (gap_significance > adaptive_threshold and 
+                gap > absolute_threshold and
+                relative_gap > 0.1):  # Minimum relative gap requirement
+                
+                significant_gaps.append({
+                    'index': i + 1,
+                    'significance': gap_significance,
+                    'gap_size': gap,
+                    'relative_gap': relative_gap
+                })
+        
+        # If no significant gaps found, use statistical clustering
+        if not significant_gaps:
+            # Use z-score based pruning for moves significantly worse than best
+            best_score = max(scores) if scores[0] > scores[-1] else min(scores)
+            for i, score in enumerate(scores):
+                z_score = abs(score - best_score) / std_dev if std_dev > 0 else 0
+                if z_score > 2.0:  # More than 2 standard deviations worse
+                    return i
+            return len(scores)
+        
+        # Find the most significant gap
+        most_significant = max(significant_gaps, key=lambda x: x['significance'])
+        
+        # Additional validation: ensure we're not cutting too aggressively
+        cut_index = most_significant['index']
+        
+        # Don't cut if it would leave fewer than 2 moves (unless forced)
+        min_moves_to_keep = max(2, min(5, len(scores) // 3))
+        if cut_index < min_moves_to_keep:
+            # Look for the next significant gap that preserves enough moves
+            for gap in sorted(significant_gaps, key=lambda x: x['index']):
+                if gap['index'] >= min_moves_to_keep:
+                    return gap['index']
+            return len(scores)
+        
+        # Ensure we're not cutting in the middle of a cluster
+        # Check if scores around the cut point are relatively uniform
+        window_size = min(3, cut_index // 2)
+        if window_size > 0:
+            pre_cut_scores = scores[max(0, cut_index - window_size):cut_index]
+            post_cut_scores = scores[cut_index:min(len(scores), cut_index + window_size)]
+            
+            if pre_cut_scores and post_cut_scores:
+                pre_avg = sum(pre_cut_scores) / len(pre_cut_scores)
+                post_avg = sum(post_cut_scores) / len(post_cut_scores)
+                
+                # If the averages are too close, the cut might be in a cluster
+                if abs(pre_avg - post_avg) / score_range < 0.15:
+                    # Look for a clearer gap
+                    for gap in sorted(significant_gaps, key=lambda x: x['index'], reverse=True):
+                        if gap['index'] > cut_index and gap['significance'] > adaptive_threshold * 0.8:
+                            return gap['index']
+                    return len(scores)
+        
+        return cut_index
 
     def mvv_lva_score(self, board: chess.Board, move: chess.Move) -> float:
         """
@@ -325,17 +442,17 @@ class Computer:
     }
 
     MATERIAL: dict[int, float] = {
-        chess.PAWN: 1.0,
+        chess.PAWN: 0.9,
         chess.KNIGHT: 3.0,
         chess.BISHOP: 3.25,
-        chess.ROOK: 5.00,
+        chess.ROOK: 4.80,
         chess.QUEEN: 9.25,
         chess.KING: 0
     }
 
-    ESTIMATED_PAWN_VALUE = 10000
+    ESTIMATED_PAWN_VALUE = 20000
 
-    def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, original_depth: int = 0, use_mvv_lva: bool = False) -> float:
+    def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *, original_depth: int = 0) -> float:
         """
         Evaluate the best move to make using the Minimax algorithm.
 
@@ -378,9 +495,9 @@ class Computer:
         best_score = float('-inf') if is_maximizing else float('inf')
 
         # Futility pruning - only at frontier nodes and when not in check
-        if depth <= 3:
+        if depth <= 2 and not board.is_check():
             static_eval = self.evaluate(board)
-            margin = self.ESTIMATED_PAWN_VALUE * depth * 1.5
+            margin = self.ESTIMATED_PAWN_VALUE * 1.5 * depth  # More conservative margin
             
             if is_maximizing and static_eval + margin < alpha:
                 self.alpha_cuts += 1
@@ -391,7 +508,20 @@ class Computer:
                 self.prunes += 1
                 return static_eval - margin
 
-        # Move ordering with history heuristic
+        # Null Move Pruning - more conservative implementation
+        if depth >= 3 and not board.is_check():
+            R = 2  # More conservative reduction
+            board.push(chess.Move.null())
+            null_score = -self.minimax(board, depth - 1 - R, -beta, -alpha, 
+                                    original_depth=original_depth)
+            board.pop()
+            
+            if null_score >= beta:
+                self.beta_cuts += 1
+                self.prunes += 1
+                return null_score
+
+        # Move ordering
         legal_moves = list(board.legal_moves)
         
         # Get killer moves for current depth
@@ -403,57 +533,17 @@ class Computer:
         killer_moves_in_legals = [move for move in killer_moves if move in legal_moves and move not in capture_moves]
         quiet_moves = [move for move in legal_moves if move not in capture_moves and move not in killer_moves_in_legals]
         
-        # Order captures with SEE (more accurate than MVV-LVA)
+        # Order captures with MVV-LVA if enabled
         if capture_moves:
             capture_moves = self.see_ordering(board, capture_moves)
         
-        # Order quiet moves using history heuristic
-        quiet_moves.sort(key=lambda move: self.history_table.get(move, 0), reverse=True)
-        
-        # Combine moves: captures first, then killer moves, then quiet moves ordered by history
+        # Combine moves: captures first, then killer moves, then quiet moves
         ordered_moves = capture_moves + killer_moves_in_legals + quiet_moves
 
-        # Check Extensions
-        extension = 0
-        if board.is_check():
-            extension = 1  # Extend search depth when in check
-
-        # Null Move Pruning - more conservative implementation
-        if depth >= 3 and not board.is_check() and not any(board.is_capture(move) for move in board.legal_moves):
-            R = 2  # More conservative reduction
-            board.push(chess.Move.null())
-            null_score = -self.minimax(board, depth - 1 - R, -beta, -alpha, 
-                                    original_depth=original_depth, 
-                                    use_mvv_lva=use_mvv_lva)
-            board.pop()
-            
-            if null_score >= beta:
-                self.beta_cuts += 1
-                self.prunes += 1
-                return null_score
-
-
-        # Principal Variation Search (PVS)
-        for i, move in enumerate(ordered_moves):
+        for move in ordered_moves:
             board.push(move)
-            
-            # Use PVS: full search for first move, null-window for others
-            if i == 0:
-                score = self.minimax(board, depth - 1 + extension, alpha, beta, 
-                                    original_depth=original_depth + extension,
-                                    use_mvv_lva=use_mvv_lva)
-            else:
-                # Null-window search
-                score = self.minimax(board, depth - 1 + extension, alpha, alpha + 1, 
-                                    original_depth=original_depth + extension,
-                                    use_mvv_lva=use_mvv_lva)
-                
-                # If null-window search fails high, do full search
-                if (is_maximizing and score > alpha) or (not is_maximizing and score < beta):
-                    score = self.minimax(board, depth - 1 + extension, alpha, beta, 
-                                        original_depth=original_depth + extension,
-                                        use_mvv_lva=use_mvv_lva)
-            
+            score = self.minimax(board, depth - 1, alpha, beta, 
+                                original_depth=original_depth)
             board.pop()
             
             if is_maximizing:
@@ -465,16 +555,10 @@ class Computer:
                     best_score = score
                 beta = min(beta, best_score)
 
-            # Update history heuristic
-            if move in self.history_table:
-                self.history_table[move] += 1
-            else:
-                self.history_table[move] = 1
-
             # Alpha-beta pruning
             if beta <= alpha:
                 # Store quiet moves as killer moves
-                if not board.is_capture(move) and not board.gives_check(move):
+                if move not in capture_moves:
                     if search_depth not in self.killer_moves:
                         self.killer_moves[search_depth] = []
                     if move not in self.killer_moves[search_depth]:
@@ -945,10 +1029,15 @@ class Computer:
         if opening_best is not None:
             print("Using random opening move")
             return opening_best
+        
+        move = self.best_syzygy(board)
+        if move is not None:
+            print("Using Syzygy:",board.san(move))
+            return move
     
         return None
 
-    def best_move(self, board: chess.Board, timeout: float=float('inf')) -> chess.Move | None:
+    def best_move(self, board: chess.Board, timeout: float=float('inf'), time_per_move: float | None = None) -> chess.Move | None:
         
         """
         Determine and return the best move for the computer player using the Minimax algorithm.
@@ -957,6 +1046,8 @@ class Computer:
         :type board: chess.Board
         :param timeout: The maximum allowed time to find the best move
         :type timeout: float
+        :param time_per_move: The allowed time per move. If specified, overrides the timeout
+        :type time_per_move: float
         :return: The best legal move for the computer player, or None if no move is possible
         :rtype: chess.Move | None
         """
@@ -973,7 +1064,9 @@ class Computer:
         print(f"{"white" if board.turn == chess.WHITE else "black"} move")
 
         self.start_time = time.time()
-        self.timeout = timeout
+        self.timeout = time_per_move or self.allocated_time(timeout, board.fullmove_number)
+
+        print(f"Using {self.timeout:.2f}s allocated time")
 
         depth = 1
         best_move = None
@@ -1005,14 +1098,6 @@ class Computer:
             move_score_map.sort(key=lambda x: x[1], reverse=board.turn == chess.WHITE)
             moves = [move for move, _ in move_score_map]
 
-            # Get best score: If can_syzygy and score is not high enough (or is not completely lost) after a shallow search, then use syzygy
-            if depth > 2:
-                best_score = maxmin(move_score_map, key=lambda x: x[1])[1]
-                move = self.best_syzygy(board, best_score)
-                if move is not None:
-                    print("Using Syzygy:",board.san(move))
-                    return move
-
             # Gradually filter out based on the previous scores
             # Force computers to look to depth 3 & for at least 1 second
             if not reset and depth >= 3 and time.time() - self.start_time > 1:
@@ -1025,7 +1110,8 @@ class Computer:
                     threshold = 0.1 * (depth - 1) * (len(list(board.legal_moves)) / len(moves))
                     threshold = min(threshold, 0.35)
                 print("Threshold:",threshold)
-                turning_point = self._turning_point([score for _, score in move_score_map], threshold=threshold)
+                context = {'search_depth': depth, 'move_count': len(move_score_map), 'game_stage': stage}
+                turning_point = self._turning_point([score for _, score in move_score_map], threshold=threshold, context=context)
                 move_score_map = move_score_map[:turning_point]
                 moves = moves[:turning_point]
             print(len(moves),"moves:",[board.san(m) for m in moves])
@@ -1047,13 +1133,14 @@ class Computer:
 
                 # LMR : reduce depth for later moves in the list
                 reduction = 0
-                if depth > 3 and stage != Computer.stageLATE: # Only apply when the computer has a good idea of the position and not in the endgame
-                    if i > self._turning_point([score for _, score in move_score_map], threshold=1.5 - (i / len(moves))): # Dynamic threshold based on move number
-                        print("LMR",end='\t')
-                        reduction += 1
+                # if depth > 3 and stage != Computer.stageLATE: # Only apply when the computer has a good idea of the position and not in the endgame
+                #     lmr_context = {'search_depth': depth, 'move_count': len(move_score_map), 'game_stage': stage}
+                #     if i > self._turning_point([score for _, score in move_score_map], threshold=1.5 - (i / len(moves)), context=lmr_context): # Dynamic threshold based on move number
+                #         print("LMR",end='\t')
+                #         reduction += 1
 
                 board.push(move)
-                score = self.minimax(board, depth - reduction, float('-inf'), float('inf'), original_depth=depth - reduction, use_mvv_lva=True)
+                score = self.minimax(board, depth - reduction, float('-inf'), float('inf'), original_depth=depth - reduction)
                 board.pop()
 
                 if self.is_timeup():
@@ -1117,6 +1204,8 @@ class Computer:
 
         return best_move
 
+    # def ponder(self, board: chess.Board)
+
     ##################################################
     #                     EXTRAS                     #
     ##################################################
@@ -1131,6 +1220,9 @@ class Computer:
             return Computer.stageMIDDLE
         else:
             return Computer.stageLATE
+
+    def allocated_time(self, t: float, m: int) -> float:
+        return max(0.05, (t / (20 + (40 - m)/2)))
 
     def is_timeup(self) -> bool:
         if self.timeout is None or self.start_time is None:
@@ -1175,8 +1267,8 @@ class Computer:
 
             print("DEPTH",i + 1)
 
-            normal_score = c.minimax(chess.Board(normal_fen), i + 1, float('-inf'), float('inf'), original_depth=i + 1, use_mvv_lva=True)
-            no_pawn_score = c.minimax(chess.Board(fen_without_pawn), i + 1, float('-inf'), float('inf'), original_depth=i + 1, use_mvv_lva=True)
+            normal_score = c.minimax(chess.Board(normal_fen), i + 1, float('-inf'), float('inf'), original_depth=i + 1)
+            no_pawn_score = c.minimax(chess.Board(fen_without_pawn), i + 1, float('-inf'), float('inf'), original_depth=i + 1)
 
             c.display_metrics()
             print("Normal score:", normal_score)
@@ -1202,6 +1294,253 @@ class Computer:
         print(f"""
 {__version__.capitalize()}: I evaluate the position at {score} in my favour.
 """)
+
+    @classmethod
+    def cutechess(cls) -> None:
+        """UCI (Universal Chess Interface) protocol implementation."""
+        board = chess.Board()
+        computer = None
+        search_stop_requested = False
+        current_search_thread = None
+        
+        # Engine options
+        options = {
+            "Hash": 128,  # MB
+            "Threads": 1,
+            "MultiPV": 1,
+            "SyzygyPath": "",
+            "SyzygyProbeDepth": 1,
+            "Syzygy50MoveRule": True,
+            "UseNNUE": False,
+            "Contempt": 0,
+        }
+        
+        def create_computer():
+            """Create a new computer instance with the correct color."""
+            nonlocal computer
+            computer = Computer(board.turn)
+            
+        create_computer()
+        
+        def parse_go_parameters(tokens: list[str]) -> dict:
+            """Parse go command parameters and return a dictionary of search settings."""
+            params = {
+                "movetime": None,
+                "wtime": None,
+                "btime": None,
+                "winc": None,
+                "binc": None,
+                "depth": None,
+                "nodes": None,
+                "infinite": False
+            }
+            
+            i = 1
+            while i < len(tokens):
+                token = tokens[i]
+                if token == "movetime" and i + 1 < len(tokens):
+                    params["movetime"] = int(tokens[i + 1]) / 1000.0  # Convert ms to seconds
+                    i += 2
+                elif token == "wtime" and i + 1 < len(tokens):
+                    params["wtime"] = int(tokens[i + 1]) / 1000.0
+                    i += 2
+                elif token == "btime" and i + 1 < len(tokens):
+                    params["btime"] = int(tokens[i + 1]) / 1000.0
+                    i += 2
+                elif token == "winc" and i + 1 < len(tokens):
+                    params["winc"] = int(tokens[i + 1]) / 1000.0
+                    i += 2
+                elif token == "binc" and i + 1 < len(tokens):
+                    params["binc"] = int(tokens[i + 1]) / 1000.0
+                    i += 2
+                elif token == "depth" and i + 1 < len(tokens):
+                    params["depth"] = int(tokens[i + 1])
+                    i += 2
+                elif token == "nodes" and i + 1 < len(tokens):
+                    params["nodes"] = int(tokens[i + 1])
+                    i += 2
+                elif token == "infinite":
+                    params["infinite"] = True
+                    i += 1
+                else:
+                    i += 1
+            
+            return params
+        
+        def calculate_timeout(params: dict) -> float:
+            """Calculate appropriate timeout based on time control parameters."""
+            if params["movetime"] is not None:
+                return params["movetime"]
+                
+            if params["infinite"]:
+                return float('inf')
+                
+            # Time control calculation
+            time_remaining = params["wtime"] if board.turn == chess.WHITE else params["btime"]
+            time_increment = params["winc"] if board.turn == chess.WHITE else params["binc"]
+            
+            if time_remaining is not None:
+                # Simple time management: use 1/40th of remaining time + increment
+                moves_to_go = 40  # Estimate 40 moves remaining
+                base_time = time_remaining / moves_to_go
+                if time_increment is not None:
+                    base_time += time_increment
+                # Don't use more than 1/4 of remaining time
+                return min(base_time, time_remaining * 0.25)
+                
+            return 10.0  # Default timeout if no time control specified
+        
+        def reset_engine():
+            """Reset the engine state for a new game."""
+            nonlocal computer, search_stop_requested
+            computer = Computer(board.turn)
+            search_stop_requested = False
+            # Clear caches for new game
+            computer.transposition_table.clear()
+            computer.pawn_hash_cache.clear()
+            computer.history_table.clear()
+            computer.killer_moves.clear()
+        
+        while True:
+            try:
+                line = input().strip()
+                if not line:
+                    continue
+                    
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                print("info string Engine stopped by user")
+                break
+
+            # Handle UCI commands
+            if line == "uci":
+                print(f"id name {NAME} {__version__}")
+                print("id author Vai")
+                # Print available options
+                print("option name Hash type spin default 128 min 1 max 1024")
+                print("option name Threads type spin default 1 min 1 max 1")  # Single-threaded for now
+                print("option name MultiPV type spin default 1 min 1 max 1")   # Single PV for now
+                print("option name SyzygyPath type string default \"\"")
+                print("option name SyzygyProbeDepth type spin default 1 min 1 max 100")
+                print("option name Syzygy50MoveRule type check default true")
+                print("option name UseNNUE type check default false")
+                print("option name Contempt type spin default 0 min -100 max 100")
+                print("uciok")
+
+            elif line == "isready":
+                print("readyok")
+
+            elif line == "ucinewgame":
+                reset_engine()
+                print("info string New game started")
+
+            elif line.startswith("setoption"):
+                tokens = line.split()
+                if len(tokens) >= 5 and tokens[1] == "name" and tokens[3] == "value":
+                    option_name = tokens[2]
+                    option_value = tokens[4]
+                    
+                    if option_name in options:
+                        try:
+                            if isinstance(options[option_name], bool):
+                                options[option_name] = option_value.lower() == "true"
+                            elif isinstance(options[option_name], int):
+                                options[option_name] = int(option_value)
+                            elif isinstance(options[option_name], str):
+                                options[option_name] = option_value
+                            print(f"info string Set option {option_name} = {option_value}")
+                        except ValueError:
+                            print(f"info string Invalid value for option {option_name}: {option_value}")
+                    else:
+                        print(f"info string Unknown option: {option_name}")
+                else:
+                    print("info string Invalid setoption command format")
+
+            elif line.startswith("position"):
+                tokens = line.split()
+                if "startpos" in tokens:
+                    board = chess.Board()
+                    moves_index = tokens.index("startpos") + 1
+                elif "fen" in tokens:
+                    fen_index = tokens.index("fen") + 1
+                    # FEN can have 6 parts, but we need to handle variable length
+                    fen_parts = []
+                    i = fen_index
+                    while i < len(tokens) and tokens[i] != "moves":
+                        fen_parts.append(tokens[i])
+                        i += 1
+                    fen_str = " ".join(fen_parts)
+                    try:
+                        board = chess.Board(fen=fen_str)
+                        moves_index = i
+                    except ValueError:
+                        print("info string Invalid FEN")
+                        continue
+                else:
+                    moves_index = len(tokens)
+
+                if "moves" in tokens:
+                    moves_idx = tokens.index("moves") + 1
+                    for move_str in tokens[moves_idx:]:
+                        try:
+                            move = chess.Move.from_uci(move_str)
+                            if move in board.legal_moves:
+                                board.push(move)
+                            else:
+                                print(f"info string Illegal move: {move_str}")
+                                break
+                        except ValueError:
+                            print(f"info string Invalid move: {move_str}")
+                            break
+                
+                # Update computer with current position's turn
+                create_computer()
+
+            elif line.startswith("go"):
+                search_stop_requested = False
+                tokens = line.split()
+                params = parse_go_parameters(tokens)
+                
+                # Calculate timeout based on parameters
+                timeout = calculate_timeout(params)
+                
+                # For fixed depth search, we'll use a simplified approach
+                # since the current best_move implementation doesn't support fixed depth directly
+                if params["depth"] is not None:
+                    # Create a temporary computer instance for fixed depth search
+                    temp_computer = Computer(board.turn)
+                    # Set a very high timeout since we want to complete the fixed depth
+                    move = temp_computer.best_move(board, timeout=float('inf'))
+                else:
+                    # Normal time-controlled search - ensure computer is properly initialized
+                    create_computer()  # Ensure computer is initialized
+                    move = computer.best_move(board, timeout=timeout) # type: ignore
+                
+                if move is None:
+                    # If no legal moves, check if game is over
+                    if board.is_game_over():
+                        if board.is_checkmate():
+                            print("info string Checkmate")
+                        elif board.is_stalemate():
+                            print("info string Stalemate")
+                        else:
+                            print("info string Game over")
+                        print("bestmove resign")
+                    else:
+                        print("bestmove 0000")  # Null move (shouldn't happen)
+                else:
+                    print(f"bestmove {move.uci()}")
+
+            elif line == "stop":
+                search_stop_requested = True
+                print("info string Search stopped")
+
+            elif line == "quit":
+                sys.exit(0)
+
+            else:
+                print(f"info string Unknown command: {line}")
 
 
 def profile_evaluation() -> None:
@@ -1245,7 +1584,7 @@ def main():
     while not board.is_game_over():
         print(board,"\n\n")
         player = players[0] if board.turn == chess.WHITE else players[1]
-        move = player.best_move(board, timeout=15)
+        move = player.best_move(board, time_per_move=20)
         if move is None:
             break
         print("\n\nMove:", board.san(move))
