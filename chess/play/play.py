@@ -53,8 +53,6 @@ class GameState:
         self.remaining_time[player_index] -= move_time
         # Add bonus time
         self.remaining_time[player_index] += self.time_bonus[player_index]
-        # Ensure time doesn't go negative
-        self.remaining_time[player_index] = max(0, self.remaining_time[player_index])
         
     def swap_players(self):
         if len(self.players) == 2:
@@ -360,7 +358,7 @@ class GameLoop:
         self.log_enabled = log_enabled
         self.players = players
         self.session = f"{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{players[0].upper()}_{players[1].upper()}"
-        self.TIME_AT_START = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.TIME_AT_START = datetime.now().strftime('%d-%m %H:%M:%S')
         self.opening_fen = game_state.original_fen
         
     def get_timeout_for_player_index(self, player_index: int) -> float:
@@ -377,8 +375,8 @@ class GameLoop:
         if not self.log_enabled:
             return None
         
-        self.TIME_AT_START = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
+        self.TIME_AT_START = datetime.now().strftime('%d-%m %H:%M:%S')
+        move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1} {self.TIME_AT_START}.log"
         os.makedirs(os.path.dirname(move_log_path), exist_ok=True)
         return open(move_log_path, 'w')
         
@@ -446,8 +444,11 @@ class GameLoop:
             self.move_logger.print_and_log(
                 self.move_logger.header(self.game_state.wins, self.players, self.timeouts, self.game_state.elo_ratings)
             )
+
+            game_over = False
             
-            while not self.game_state.is_game_over():
+            while not self.game_state.is_game_over() and not game_over:
+
                 for player in self.game_state.current_players:
                     # Material
                     material = self.game_state.calculate_material()
@@ -480,11 +481,13 @@ class GameLoop:
                     move_time = move_end_time - move_start_time
 
                     # Resign if time runs out
-                    if move_time <= 0:
+                    if self.game_state.remaining_time[player_index] <= 0:
+                        game_over = True
                         break
-                    
+
                     if move is None:
-                        return False
+                        game_over = True
+                        break
                         
                     # Update the player's remaining time based on color, not index
                     self.game_state.update_time_after_move(player_index, move_time)
@@ -505,8 +508,9 @@ class GameLoop:
                                       game_count, self.game_state.wins, self.players, self.opening_fen, self.game_state.elo_ratings)
             )
 
-            move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1}_{self.TIME_AT_START}.log"
-            log_name = f"{move_log_path.split('.')[0]}_{winner_name}.log"
+            move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1} {self.TIME_AT_START}.log"
+            timeout_string = "-TO" if game_over else ""
+            log_name = f"{move_log_path.split('.')[0]} {winner_name}{timeout_string}.log"
             os.rename(move_log_path, log_name)
             
             return True
