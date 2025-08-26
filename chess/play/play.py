@@ -69,6 +69,14 @@ class GameState:
         return self.board.is_game_over()
         
     def get_result(self) -> str:
+        if self.remaining_time[0] <= 0:
+            if self.board.has_insufficient_material(chess.BLACK):
+                return '1/2-1/2'
+            return '0-1'
+        elif self.remaining_time[1] <= 0:
+            if self.board.has_insufficient_material(chess.WHITE):
+                return '1/2-1/2'
+            return '1-0'
         return self.board.result()
     
     def get_turn(self) -> bool:
@@ -146,7 +154,7 @@ class MoveLogger:
         if self.log_file is not None:
             print(*args, file=self.log_file, **kwargs)
             
-    def header(self, game_count: int, wins: List[float], players: List[str], timeouts: List[Tuple[float, float]], elo_ratings: List[float]) -> str:
+    def header(self, wins: List[float], players: List[str], timeouts: List[Tuple[float, float]], elo_ratings: List[float]) -> str:
         white_info = f"{players[0].upper()} ({wins[0]} | {elo_ratings[0]:.0f})"
         black_info = f"({wins[1]} | {elo_ratings[1]:.0f}) {players[1].upper()}"
         # Extract base and bonus times for display
@@ -436,16 +444,14 @@ class GameLoop:
                 print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
                 
             self.move_logger.print_and_log(
-                self.move_logger.header(game_count, self.game_state.wins, self.players, self.timeouts, self.game_state.elo_ratings)
+                self.move_logger.header(self.game_state.wins, self.players, self.timeouts, self.game_state.elo_ratings)
             )
             
             while not self.game_state.is_game_over():
                 for player in self.game_state.current_players:
+                    # Material
                     material = self.game_state.calculate_material()
-                    if self.game_state.get_turn() == chess.WHITE:
-                        print("Material:",material)
-                    else:
-                        print("\nMaterial:",material)
+                    print("\nMaterial:",material)
                     print(self.game_state.board, "\n\n")
                     
                     if self.game_state.is_game_over():
@@ -453,10 +459,12 @@ class GameLoop:
                         
                     current_player = player(self.game_state.get_turn())
                     # Determine which player index this is and use their timeout
-                    player_index = self.game_state.current_players.index(player)
+                    if self.game_state.get_turn() == chess.WHITE:
+                        color = chess.WHITE if game_count % 2 == 0 else chess.BLACK
+                    else:
+                        color = chess.BLACK if game_count % 2 == 0 else chess.WHITE
+                    player_index = 1 if color == chess.BLACK else 0
                     
-                    # Start timing the move
-                    move_start_time = time.time()
                     # Get the player module and check its version
                     player_module = sys.modules[current_player.__module__]
                     if version.parse(player_module.__version__) < version.parse('1.7.3'): # First version which supports modern timeout
@@ -464,19 +472,22 @@ class GameLoop:
                         print(f"WARNING: Version {player_module.__version__} does not support modern timeout. Using fallback timeout of {timeout} seconds.")
                     else:
                         timeout = self.get_timeout_for_player_index(player_index)
+
+                    # Start timing the move
+                    move_start_time = time.time()
                     move = current_player.best_move(self.game_state.board, timeout=timeout)
                     move_end_time = time.time()
                     move_time = move_end_time - move_start_time
+
+                    # Resign if time runs out
+                    if move_time <= 0:
+                        break
                     
                     if move is None:
                         return False
                         
                     # Update the player's remaining time based on color, not index
-                    # Determine if current player is white or black
-                    is_white = (self.game_state.game_count % 2 == 0 and player_index == 0) or \
-                              (self.game_state.game_count % 2 == 1 and player_index == 1)
-                    player_color_index = 0 if is_white else 1  # 0 = white, 1 = black
-                    self.game_state.update_time_after_move(player_color_index, move_time)
+                    self.game_state.update_time_after_move(player_index, move_time)
                     
                     # Log time information - show both players' remaining time for debugging
                     self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}. {self.game_state.board.san(move).ljust(10)}",end='')
