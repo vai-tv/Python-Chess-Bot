@@ -1,6 +1,6 @@
 import chess
 
-__version__ = None
+__version__ = "0.0"
 
 class Computer:
     
