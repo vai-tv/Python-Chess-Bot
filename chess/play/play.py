@@ -439,7 +439,7 @@ class GameLoop:
                 self.game_state.board = chess.Board(self.opening_fen)
                 
             if move_log_file is not None:
-                print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
+                print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1} {datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
                 
             self.move_logger.print_and_log(
                 self.move_logger.header(self.game_state.wins, self.players, self.timeouts, self.game_state.elo_ratings)
@@ -643,7 +643,7 @@ TRACEBACK:
             if not isinstance(e, KeyboardInterrupt):
                 with open(f"{error_dir}/error.log", "a") as f:
                     f.write(error_message + "\n\n")
-            with open(f"{error_dir}/G{game_loop.game_state.game_count + 1}_{game_loop.TIME_AT_START}.log", "a") as f:
+            with open(f"{error_dir}/G{game_loop.game_state.game_count + 1} {game_loop.TIME_AT_START}.log", "a") as f:
                 f.write(footer)
                 f.write("\n\n" + error_message)
 
