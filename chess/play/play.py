@@ -17,8 +17,12 @@ import sys
 import time
 import traceback
 import urllib.parse
+
 from datetime import datetime
-from typing import List, Optional, Any
+
+from typing import List, Optional, Any, Tuple
+
+from packaging import version
 
 
 class GameState:
@@ -32,9 +36,25 @@ class GameState:
         self.game_count = 0
         self.current_players = []
         self.elo_ratings = [1500.0, 1500.0]  # Initialize ELO ratings for both players
+        self.remaining_time = [0.0, 0.0]  # [white_remaining, black_remaining] in seconds
+        self.time_bonus = [0.0, 0.0]  # [white_bonus, black_bonus] in seconds
         
-    def reset(self):
+    def reset(self, timeouts: List[Tuple[float, float]]):
         self.board = chess.Board(self.original_fen)
+        # Initialize remaining time from base time and bonus
+        self.remaining_time[0] = timeouts[0][0]  # White base time
+        self.remaining_time[1] = timeouts[1][0]  # Black base time
+        self.time_bonus[0] = timeouts[0][1]  # White bonus time
+        self.time_bonus[1] = timeouts[1][1]  # Black bonus time
+        
+    def update_time_after_move(self, player_index: int, move_time: float):
+        """Update remaining time after a move, subtracting move time and adding bonus."""
+        # Subtract the time used for the move
+        self.remaining_time[player_index] -= move_time
+        # Add bonus time
+        self.remaining_time[player_index] += self.time_bonus[player_index]
+        # Ensure time doesn't go negative
+        self.remaining_time[player_index] = max(0, self.remaining_time[player_index])
         
     def swap_players(self):
         if len(self.players) == 2:
@@ -126,12 +146,28 @@ class MoveLogger:
         if self.log_file is not None:
             print(*args, file=self.log_file, **kwargs)
             
-    def header(self, game_count: int, wins: List[float], players: List[str], timeouts: List[float], elo_ratings: List[float]) -> str:
+    def header(self, game_count: int, wins: List[float], players: List[str], timeouts: List[Tuple[float, float]], elo_ratings: List[float]) -> str:
         white_info = f"{players[0].upper()} ({wins[0]} | {elo_ratings[0]:.0f})"
         black_info = f"({wins[1]} | {elo_ratings[1]:.0f}) {players[1].upper()}"
+        # Extract base and bonus times for display
+        white_base, white_bonus = timeouts[0]
+        black_base, black_bonus = timeouts[1]
+
+        if round(white_base) == white_base:
+            white_base = int(white_base)
+        if round(white_bonus) == white_bonus:
+            white_bonus = int(white_bonus)
+        if round(black_base) == black_base:
+            black_base = int(black_base)
+        if round(black_bonus) == black_bonus:
+            black_bonus = int(black_bonus)
+        
+        white_time_str = f"{white_base}+{white_bonus}"
+        black_time_str = f"{black_base}+{black_bonus}"
+        
         return f"""
  ---- {white_info.ljust(17)} VS {black_info.rjust(17)} -----
-| WHITE TIME: {(str(timeouts[0]) + 's').ljust(17)} {("BLACK TIME: " + str(timeouts[1]) + 's').rjust(17)} |
+| WHITE TIME: {white_time_str.ljust(17)} {("BLACK TIME: " + black_time_str).rjust(17)} |
 | GAME BEGINS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(30)} |
  -------------------------------------------------
 """
@@ -307,12 +343,12 @@ class GameLoop:
     """Manages the main game execution loop."""
     
     def __init__(self, game_state: GameState, move_logger: MoveLogger, 
-                 opening_handler: Optional[OpeningHandler], timeouts: List[float],
+                 opening_handler: Optional[OpeningHandler], timeouts: List[Tuple[float, float]],
                  log_enabled: bool, players: List[str]):
         self.game_state = game_state
         self.move_logger = move_logger
         self.opening_handler = opening_handler
-        self.timeouts = timeouts  # [player1_timeout, player2_timeout]
+        self.timeouts = timeouts  # [(player1_base, player1_bonus), (player2_base, player2_bonus)]
         self.log_enabled = log_enabled
         self.players = players
         self.session = f"{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{players[0].upper()}_{players[1].upper()}"
@@ -321,22 +357,13 @@ class GameLoop:
         
     def get_timeout_for_player_index(self, player_index: int) -> float:
         """Get the timeout for the player at the given index."""
-        # Timeouts are always stored as [white_timeout, black_timeout]
-        # When players are swapped, we need to return the appropriate timeout
-        if player_index == 0:
-            # First player in current_players - if game_count is even, this is white
-            # if game_count is odd, this is black
-            if self.game_state.game_count % 2 == 0:
-                return self.timeouts[0]  # White's timeout
-            else:
-                return self.timeouts[1]  # Black's timeout
-        else:
-            # Second player in current_players - if game_count is even, this is black
-            # if game_count is odd, this is white
-            if self.game_state.game_count % 2 == 0:
-                return self.timeouts[1]  # Black's timeout
-            else:
-                return self.timeouts[0]  # White's timeout
+        # Determine if the player at this index is white or black
+        is_white = (self.game_state.game_count % 2 == 0 and player_index == 0) or \
+                  (self.game_state.game_count % 2 == 1 and player_index == 1)
+        player_color_index = 0 if is_white else 1  # 0 = white, 1 = black
+        
+        # Return the remaining time for the player (can be above base+bonus due to accumulated bonus)
+        return self.game_state.remaining_time[player_color_index]
         
     def setup_logging(self, game_count: int):
         if not self.log_enabled:
@@ -397,7 +424,8 @@ class GameLoop:
             else:
                 self.game_state.current_players = [self.game_state.players[1], self.game_state.players[0]]
                 
-            self.game_state.reset()
+            # Reset the game state with timeouts
+            self.game_state.reset(self.timeouts)
             
             self.opening_fen = self.game_state.original_fen
             if self.opening_handler:
@@ -426,15 +454,33 @@ class GameLoop:
                     current_player = player(self.game_state.get_turn())
                     # Determine which player index this is and use their timeout
                     player_index = self.game_state.current_players.index(player)
-                    move = current_player.best_move(self.game_state.board, timeout=self.get_timeout_for_player_index(player_index))
+                    
+                    # Start timing the move
+                    move_start_time = time.time()
+                    # Get the player module and check its version
+                    player_module = sys.modules[current_player.__module__]
+                    if version.parse(player_module.__version__) < version.parse('1.7.3'): # First version which supports modern timeout
+                        timeout = min(30, self.get_timeout_for_player_index(player_index) * 0.1) # Fallback
+                        print(f"WARNING: Version {player_module.__version__} does not support modern timeout. Using fallback timeout of {timeout} seconds.")
+                    else:
+                        timeout = self.get_timeout_for_player_index(player_index)
+                    move = current_player.best_move(self.game_state.board, timeout=timeout)
+                    move_end_time = time.time()
+                    move_time = move_end_time - move_start_time
                     
                     if move is None:
                         return False
                         
-                    if self.game_state.get_turn() == chess.WHITE:
-                        self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}. {self.game_state.board.san(move).ljust(10)}",end='')
-                    else:
-                        self.move_logger.print_and_log(f"{self.game_state.board.san(move)}")
+                    # Update the player's remaining time based on color, not index
+                    # Determine if current player is white or black
+                    is_white = (self.game_state.game_count % 2 == 0 and player_index == 0) or \
+                              (self.game_state.game_count % 2 == 1 and player_index == 1)
+                    player_color_index = 0 if is_white else 1  # 0 = white, 1 = black
+                    self.game_state.update_time_after_move(player_color_index, move_time)
+                    
+                    # Log time information - show both players' remaining time for debugging
+                    self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}. {self.game_state.board.san(move).ljust(10)}",end='')
+                    self.move_logger.print_and_log(f" (Time: {move_time:.2f}s, White: {self.game_state.remaining_time[0]:.2f}s, Black: {self.game_state.remaining_time[1]:.2f}s)")
                         
                     self.game_state.push_move(move)
                     
@@ -472,6 +518,29 @@ class ChessGameManager:
         self.setup_paths()
         self.players = self._setup_players()
         
+    def _parse_timeout_format(self, timeout: list[str]) -> List[Tuple[float, float]]:
+        """
+        Parse timeout in format ["a+b", "c+d"] where:
+        - a is base time for player 1
+        - b is bonus time for player 1
+        - c is base time for player 2  
+        - d is bonus time for player 2
+        
+        Also supports backward compatibility with "a c" format.
+        """
+        
+        timeoutstr1, timeoutstr2 = timeout
+        if "+" in timeoutstr1:
+            timeout1 = [(float(timeoutstr1.split('+')[0]), float(timeoutstr1.split('+')[1]))]
+        else:
+            timeout1 = [(float(timeoutstr1), 0.0)]
+        if "+" in timeoutstr2:
+            timeout2 = [(float(timeoutstr2.split('+')[0]), float(timeoutstr2.split('+')[1]))]
+        else:
+            timeout2 = [(float(timeoutstr2), 0.0)]
+        return timeout1 + timeout2
+
+    
     def _parse_arguments(self) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description="Play a chess game with selected bots.")
         sys.path.insert(0, 'chess')
@@ -488,10 +557,10 @@ class ChessGameManager:
         )
         parser.add_argument(
             '-t', '--timeout', '--time',
+            type=str,
             nargs=2,
-            type=float,
-            help="Set the timeout for each player in seconds (player1 player2).",
-            default=[10.0, 10.0]
+            help="Set the timeout for each player in format 'a+b c+d' (base+bonus for each player) or 'a c' for backward compatibility.",
+            default="10.0+0.0 10.0+0.0"
         )
         parser.add_argument(
             '-l', '--log',
@@ -511,7 +580,13 @@ class ChessGameManager:
             help="Initial FEN position of the board. Overrides opening moves if provided.",
             default=chess.STARTING_FEN
         )
-        return parser.parse_args()
+        
+        args = parser.parse_args()
+        
+        # Parse timeout string into the new format
+        args.timeout = self._parse_timeout_format(args.timeout)
+        
+        return args
         
     def setup_paths(self):
         """Setup system paths for imports."""
