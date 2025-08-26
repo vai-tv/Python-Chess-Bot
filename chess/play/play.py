@@ -468,7 +468,7 @@ class GameLoop:
                     # Get the player module and check its version
                     player_module = sys.modules[current_player.__module__]
                     if version.parse(player_module.__version__) < version.parse('1.7.3'): # First version which supports modern timeout
-                        timeout = min(30, self.get_timeout_for_player_index(player_index) * 0.1) # Fallback
+                        timeout = min(15, self.get_timeout_for_player_index(player_index) * 0.1) # Fallback
                         print(f"WARNING: Version {player_module.__version__} does not support modern timeout. Using fallback timeout of {timeout} seconds.")
                     else:
                         timeout = self.get_timeout_for_player_index(player_index)
