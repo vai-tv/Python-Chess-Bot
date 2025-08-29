@@ -69,13 +69,13 @@ class GameState:
     def get_result(self) -> str:
         # Check for timeout only if time is not infinite
         if self.remaining_time[0] != float('inf') and self.remaining_time[0] <= 0:
-            if self.board.has_insufficient_material(chess.BLACK):
+            # if self.board.has_insufficient_material(chess.BLACK):
                 return '1/2-1/2'
-            return '0-1'
+            # return '0-1'
         elif self.remaining_time[1] != float('inf') and self.remaining_time[1] <= 0:
-            if self.board.has_insufficient_material(chess.WHITE):
+            # if self.board.has_insufficient_material(chess.WHITE):
                 return '1/2-1/2'
-            return '1-0'
+            # return '1-0'
         return self.board.result()
     
     def get_turn(self) -> bool:
