@@ -586,7 +586,7 @@ class ChessGameManager:
             type=str,
             nargs=2,
             help="Set the timeout for each player in format 'a+b c+d' (base+bonus for each player) or 'a c' for backward compatibility. 'inf' to disable timeout.",
-            default="inf inf"
+            default=["inf", "inf"]
         )
         parser.add_argument(
             '-l', '--log',
