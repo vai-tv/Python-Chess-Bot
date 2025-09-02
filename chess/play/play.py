@@ -27,7 +27,7 @@ from packaging import version
 
 class GameState:
     """Manages the current state of the chess game."""
-    
+
     def __init__(self, fen: str = chess.STARTING_FEN):
         self.board = chess.Board(fen)
         self.original_fen = fen
@@ -38,6 +38,7 @@ class GameState:
         self.elo_ratings = [1500.0, 1500.0]  # Initialize ELO ratings for both players
         self.remaining_time = [0.0, 0.0]  # [white_remaining, black_remaining] in seconds
         self.time_bonus = [0.0, 0.0]  # [white_bonus, black_bonus] in seconds
+        self.time_per_move = False  # Flag for time per move mode
         
     def reset(self, timeouts: List[Tuple[float, float]]):
         self.board = chess.Board(self.original_fen)
@@ -47,12 +48,16 @@ class GameState:
         self.time_bonus[0] = timeouts[0][1]  # White bonus time
         self.time_bonus[1] = timeouts[1][1]  # Black bonus time
         
-    def update_time_after_move(self, player_index: int, move_time: float):
+    def update_time_after_move(self, player_index: int, move_time: float, timeouts: List[Tuple[float, float]]):
         """Update remaining time after a move, subtracting move time and adding bonus."""
-        # Subtract the time used for the move
-        self.remaining_time[player_index] -= move_time
-        # Add bonus time
-        self.remaining_time[player_index] += self.time_bonus[player_index]
+        if self.time_per_move:
+            # Reset to base time for next move
+            self.remaining_time[player_index] = timeouts[player_index][0]
+        else:
+            # Subtract the time used for the move
+            self.remaining_time[player_index] -= move_time
+            # Add bonus time
+            self.remaining_time[player_index] += self.time_bonus[player_index]
         
     def swap_players(self):
         if len(self.players) == 2:
@@ -144,9 +149,10 @@ class GameState:
 
 class MoveLogger:
     """Handles logging of game moves and display formatting."""
-    
-    def __init__(self, log_file: Optional[Any] = None):
+
+    def __init__(self, log_file: Optional[Any] = None, time_per_move: bool = False):
         self.log_file = log_file
+        self.time_per_move = time_per_move
         
     def print_and_log(self, *args, **kwargs):
         print(*args, **kwargs)
@@ -173,8 +179,14 @@ class MoveLogger:
         black_base_str = format_time_value(black_base)
         black_bonus_str = format_time_value(black_bonus)
         
-        white_time_str = f"{white_base_str}+{white_bonus_str}"
-        black_time_str = f"{black_base_str}+{black_bonus_str}"
+        if self.time_per_move and white_bonus == 0:
+            white_time_str = f"{white_base_str} PM"
+        else:
+            white_time_str = f"{white_base_str}+{white_bonus_str}"
+        if self.time_per_move and black_bonus == 0:
+            black_time_str = f"{black_base_str} PM"
+        else:
+            black_time_str = f"{black_base_str}+{black_bonus_str}"
         
         return f"""
  ---- {white_info.ljust(17)} VS {black_info.rjust(17)} -----
@@ -353,9 +365,9 @@ class OpeningHandler:
 class GameLoop:
     """Manages the main game execution loop."""
     
-    def __init__(self, game_state: GameState, move_logger: MoveLogger, 
+    def __init__(self, game_state: GameState, move_logger: MoveLogger,
                  opening_handler: Optional[OpeningHandler], timeouts: List[Tuple[float, float]],
-                 log_enabled: bool, players: List[str]):
+                 log_enabled: bool, players: List[str], time_per_move: bool = False):
         self.game_state = game_state
         self.move_logger = move_logger
         self.opening_handler = opening_handler
@@ -365,6 +377,8 @@ class GameLoop:
         self.session = f"{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}_{players[0].upper()}_{players[1].upper()}"
         self.TIME_AT_START = datetime.now().strftime('%d-%m %H:%M:%S')
         self.opening_fen = game_state.original_fen
+        self.game_state.time_per_move = time_per_move
+        self.move_logger.time_per_move = time_per_move
         
     def get_timeout_for_player_index(self, player_index: int) -> float:
         """Get the timeout for the player at the given index."""
@@ -471,9 +485,12 @@ class GameLoop:
                         color = chess.BLACK if game_count % 2 == 0 else chess.WHITE
                     player_index = 1 if color == chess.BLACK else 0
                     
+
+                    # Get timeout
                     # Get the player module and check its version
                     player_module = sys.modules[current_player.__module__]
-                    if version.parse(player_module.__version__) < version.parse('1.7.3'): # First version which supports modern timeout
+                    uses_old_timeout = version.parse(player_module.__version__) < version.parse('1.7.3')
+                    if not self.game_state.time_per_move and uses_old_timeout: # First version which supports modern timeout
                         timeout = min(15, self.get_timeout_for_player_index(player_index) * 0.1) # Fallback
                         print(f"WARNING: Version {player_module.__version__} does not support modern timeout. Using fallback timeout of {timeout} seconds.")
                     else:
@@ -481,7 +498,14 @@ class GameLoop:
 
                     # Start timing the move
                     move_start_time = time.time()
-                    move = current_player.best_move(self.game_state.board, timeout=timeout)
+
+                    if uses_old_timeout and self.game_state.time_per_move:
+                        move = current_player.best_move(self.game_state.board, timeout=timeout)
+                    elif self.game_state.time_per_move:
+                        move = current_player.best_move(self.game_state.board, time_per_move=timeout)
+                    else:
+                        move = current_player.best_move(self.game_state.board, timeout=timeout)
+                    
                     move_end_time = time.time()
                     move_time = move_end_time - move_start_time
 
@@ -495,7 +519,7 @@ class GameLoop:
                         break
                         
                     # Update the player's remaining time based on color, not index
-                    self.game_state.update_time_after_move(player_index, move_time)
+                    self.game_state.update_time_after_move(player_index, move_time, self.timeouts)
                     
                     # Log time information - show both players' remaining time for debugging
                     self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}. {self.game_state.board.san(move).ljust(10)}",end='')
@@ -589,6 +613,13 @@ class ChessGameManager:
             default=["inf", "inf"]
         )
         parser.add_argument(
+            '-tpm', '--timepermove',
+            type=str,
+            nargs=2,
+            help="Set the time per move for each player, overriding the standard timeout. Use 'inf' for infinite time.",
+            default=None
+        )
+        parser.add_argument(
             '-l', '--log',
             action='store_true',
             help="Enable logging of the game moves to a file when provided.",
@@ -611,6 +642,17 @@ class ChessGameManager:
         
         # Parse timeout string into the new format
         args.timeout = self._parse_timeout_format(args.timeout)
+
+        # Handle time per move override
+        if args.timepermove is not None:
+            # Parse time per move values, allowing 'inf'
+            tpm1 = float('inf') if args.timepermove[0].lower() == 'inf' else float(args.timepermove[0])
+            tpm2 = float('inf') if args.timepermove[1].lower() == 'inf' else float(args.timepermove[1])
+            # Set timeouts to time per move values with zero bonus
+            args.timeout = [(tpm1, 0.0), (tpm2, 0.0)]
+            args.time_per_move = True
+        else:
+            args.time_per_move = False
         
         return args
         
@@ -672,7 +714,7 @@ TRACEBACK:
         game_state = GameState(fen=self.args.fen)
         game_state.players = self.players
         
-        move_logger = MoveLogger()
+        move_logger = MoveLogger(time_per_move=self.args.time_per_move)
         opening_handler = OpeningHandler(self.players, self.args.opening_moves) if self.args.opening_moves > 0 and self.args.fen == chess.STARTING_FEN else None
         
         game_loop = GameLoop(
@@ -681,7 +723,8 @@ TRACEBACK:
             opening_handler=opening_handler,
             timeouts=self.args.timeout,
             log_enabled=self.args.log,
-            players=self.args.players
+            players=self.args.players,
+            time_per_move=self.args.time_per_move
         )
         
         while True:
