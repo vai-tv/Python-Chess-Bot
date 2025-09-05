@@ -322,7 +322,7 @@ class OpeningHandler:
         # Get opening from opening book
         if rnd.random() > dynamic_opening_chance and openings:
             opening = rnd.choice(openings)
-            print("Reading from opening book.")
+            print(f"Random float is above {(dynamic_opening_chance * 100):.2f}%, reading from book.")
             return opening
         else:
             print(f"Random float is below {(dynamic_opening_chance * 100):.2f}%, creating new opening.")
