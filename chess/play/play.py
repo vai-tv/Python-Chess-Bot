@@ -69,7 +69,7 @@ class GameState:
         return self.current_players[0] if color == chess.WHITE else self.current_players[1]
         
     def is_game_over(self) -> bool:
-        return self.board.is_game_over()
+        return self.board.is_game_over(claim_draw=True)
         
     def get_result(self) -> str:
         # Check for timeout only if time is not infinite
