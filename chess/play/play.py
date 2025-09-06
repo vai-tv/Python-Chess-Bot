@@ -315,17 +315,17 @@ class OpeningHandler:
             self.openings[str(self.opening_moves)] = []
         openings = self.openings[str(self.opening_moves)]
 
-        # 1 / sqrt(x)
+        # 1 / x
         # Exponential decay formula to discourage new openings when there are already many
-        dynamic_opening_chance = 1 / (max(len(openings), 1)) ** 0.5
+        new_opening_chance = 1 / max(len(openings), 1)
         
         # Get opening from opening book
-        if rnd.random() > dynamic_opening_chance and openings:
+        if rnd.random() > new_opening_chance and openings:
             opening = rnd.choice(openings)
-            print(f"Random float is above {(dynamic_opening_chance * 100):.2f}%, reading from book.")
+            print(f"Random float is above {(new_opening_chance * 100):.2f}%, reading from book.")
             return opening
         else:
-            print(f"Random float is below {(dynamic_opening_chance * 100):.2f}%, creating new opening.")
+            print(f"Random float is below {(new_opening_chance * 100):.2f}%, creating new opening.")
             
         board = game_state.board.copy()
         
