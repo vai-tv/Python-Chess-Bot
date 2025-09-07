@@ -1,5 +1,7 @@
 import chess
 
+__version__ = "0.0"
+
 from random import choice
 
 __version__ = None
