@@ -153,6 +153,12 @@ class MoveLogger:
     def __init__(self, log_file: Optional[Any] = None, time_per_move: bool = False):
         self.log_file = log_file
         self.time_per_move = time_per_move
+
+    def format_time(self, seconds: float) -> str:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:05.2f}"
         
     def print_and_log(self, *args, **kwargs):
         print(*args, **kwargs)
@@ -195,15 +201,15 @@ class MoveLogger:
  -------------------------------------------------
 """
 
-    def footer(self, board: chess.Board, winner: str, winner_name: str, 
-               game_count: int, wins: List[float], players: List[str], fen: str, elo_ratings: List[float]) -> str:
+    def footer(self, board: chess.Board, winner: str, winner_name: str,
+               game_count: int, wins: List[float], players: List[str], fen: str, elo_ratings: List[float], move_times: List[float]) -> str:
         index = game_count % 2
         white_info = f"{players[0].upper()} ({wins[0]} | {elo_ratings[0]:.0f})"
         black_info = f"({wins[1]} | {elo_ratings[1]:.0f}) {players[1].upper()}"
 
         # Create a fresh board from the original FEN to ensure consistency
         fresh_board = chess.Board(fen)
-        
+
         game = chess.pgn.Game()
         game.headers["Event"] = "Chess Bot Match"
         game.headers["Site"] = "Local"
@@ -217,20 +223,25 @@ class MoveLogger:
 
         if fen != chess.STARTING_BOARD_FEN:
             game.headers["FEN"] = fen
-            
+
         # Build the game by applying moves to the fresh board
         node = game
+        move_index = 0
         for move in board.move_stack:
             # Verify the move is legal before adding it
             if move in fresh_board.legal_moves:
                 fresh_board.push(move)
                 node = node.add_variation(move)
+                if move_index < len(move_times):
+                    time_str = self.format_time(move_times[move_index])
+                    node.comment = f"[%emt {time_str}]"
+                move_index += 1
             else:
                 # If we encounter an illegal move, just skip it
                 break
-                
+
         return f"""
-        
+
  ---- {white_info.ljust(17)} VS {black_info.rjust(17)} -----
 | GAME ENDS AT : {datetime.now().strftime('%Y-%m-%d %H:%M:%S').rjust(32)} |
 | WINNER : {f'{winner_name} ({winner.upper()})'.rjust(38)} |
@@ -379,6 +390,7 @@ class GameLoop:
         self.opening_fen = game_state.original_fen
         self.game_state.time_per_move = time_per_move
         self.move_logger.time_per_move = time_per_move
+        self.move_times = []
         
     def get_timeout_for_player_index(self, player_index: int) -> float:
         """Get the timeout for the player at the given index."""
@@ -442,7 +454,8 @@ class GameLoop:
     def play_single_game(self, game_count: int) -> bool:
         move_log_file = self.setup_logging(game_count)
         self.move_logger.log_file = move_log_file
-        
+        self.move_times = []
+
         try:
             if game_count % 2 == 0:
                 self.game_state.current_players = self.game_state.players
@@ -524,7 +537,9 @@ class GameLoop:
                     # Log time information - show both players' remaining time for debugging
                     self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}. {self.game_state.board.san(move).ljust(10)}",end='')
                     self.move_logger.print_and_log(f" (Time: {move_time:.2f}s, White: {self.game_state.remaining_time[0]:.2f}s, Black: {self.game_state.remaining_time[1]:.2f}s)")
-                        
+
+                    self.move_times.append(move_time)
+
                     self.game_state.push_move(move)
                     
             print(self.game_state.board, "\n\n")
@@ -533,8 +548,8 @@ class GameLoop:
             winner, winner_name = self.determine_winner(result, game_count)
             
             self.move_logger.print_and_log(
-                self.move_logger.footer(self.game_state.board, winner, winner_name, 
-                                      game_count, self.game_state.wins, self.players, self.opening_fen, self.game_state.elo_ratings)
+                self.move_logger.footer(self.game_state.board, winner, winner_name,
+                                      game_count, self.game_state.wins, self.players, self.opening_fen, self.game_state.elo_ratings, self.move_times)
             )
 
             move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1} {self.TIME_AT_START}.log"
@@ -689,8 +704,9 @@ TRACEBACK:
 {traceback.format_exc()}
 """ if not isinstance(e, KeyboardInterrupt) else "Game interrupted by user."
 
-        footer = game_loop.move_logger.footer(game_loop.game_state.board, "ERROR", "ERROR", 
-                                      game_loop.game_state.game_count, game_loop.game_state.wins, game_loop.players, game_loop.opening_fen, game_loop.game_state.elo_ratings)
+        footer = game_loop.move_logger.footer(game_loop.game_state.board, "ERROR", "ERROR",
+                                      game_loop.game_state.game_count, game_loop.game_state.wins, 
+                                      game_loop.players, game_loop.opening_fen, game_loop.game_state.elo_ratings, [])
 
         if self.args.log:
             if not isinstance(e, KeyboardInterrupt):
