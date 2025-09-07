@@ -81,7 +81,7 @@ class GameState:
             # if self.board.has_insufficient_material(chess.WHITE):
                 return '1/2-1/2'
             # return '1-0'
-        return self.board.result()
+        return self.board.result(claim_draw=True)
     
     def get_turn(self) -> bool:
         return self.board.turn
