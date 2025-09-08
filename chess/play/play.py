@@ -394,10 +394,8 @@ class GameLoop:
         
     def get_timeout_for_player_index(self, player_index: int) -> float:
         """Get the timeout for the player at the given index."""
-        # Determine if the player at this index is white or black
-        is_white = (self.game_state.game_count % 2 == 0 and player_index == 0) or \
-                  (self.game_state.game_count % 2 == 1 and player_index == 1)
-        player_color_index = 0 if is_white else 1  # 0 = white, 1 = black
+        # player_index 0 is white, 1 is black
+        player_color_index = player_index
         
         # Return the remaining time for the player (can be above base+bonus due to accumulated bonus)
         return self.game_state.remaining_time[player_color_index]
@@ -459,11 +457,19 @@ class GameLoop:
         try:
             if game_count % 2 == 0:
                 self.game_state.current_players = self.game_state.players
+                adjusted_timeouts = self.timeouts
+                adjusted_players = self.players
+                adjusted_wins = self.game_state.wins
+                adjusted_elo = self.game_state.elo_ratings
             else:
                 self.game_state.current_players = [self.game_state.players[1], self.game_state.players[0]]
+                adjusted_timeouts = [self.timeouts[1], self.timeouts[0]]
+                adjusted_players = [self.players[1], self.players[0]]
+                adjusted_wins = [self.game_state.wins[1], self.game_state.wins[0]]
+                adjusted_elo = [self.game_state.elo_ratings[1], self.game_state.elo_ratings[0]]
                 
-            # Reset the game state with timeouts
-            self.game_state.reset(self.timeouts)
+            # Reset the game state with adjusted timeouts
+            self.game_state.reset(adjusted_timeouts)
             
             self.opening_fen = self.game_state.original_fen
             if self.opening_handler:
@@ -492,11 +498,7 @@ class GameLoop:
                         
                     current_player = player(self.game_state.get_turn())
                     # Determine which player index this is and use their timeout
-                    if self.game_state.get_turn() == chess.WHITE:
-                        color = chess.WHITE if game_count % 2 == 0 else chess.BLACK
-                    else:
-                        color = chess.BLACK if game_count % 2 == 0 else chess.WHITE
-                    player_index = 1 if color == chess.BLACK else 0
+                    player_index = 0 if self.game_state.get_turn() == chess.WHITE else 1
                     
 
                     # Get timeout
@@ -532,7 +534,7 @@ class GameLoop:
                         break
                         
                     # Update the player's remaining time based on color, not index
-                    self.game_state.update_time_after_move(player_index, move_time, self.timeouts)
+                    self.game_state.update_time_after_move(player_index, move_time, adjusted_timeouts)
                     
                     # Log time information - show both players' remaining time for debugging
                     self.move_logger.print_and_log(f"{self.game_state.board.fullmove_number}. {self.game_state.board.san(move).ljust(10)}",end='')
