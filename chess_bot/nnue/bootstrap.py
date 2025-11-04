@@ -49,7 +49,7 @@ optimiser = optim.Adam(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
 
 def random_board() -> chess.Board:
     board = chess.Board()
-    for i in range(0, np.random.randint(0, 100)):
+    for i in range(0, np.random.randint(100, 200)):
         legal_moves = list(board.legal_moves)
         move = rnd.choice(legal_moves)
         board.push(move)
