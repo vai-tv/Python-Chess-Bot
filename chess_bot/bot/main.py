@@ -6,14 +6,17 @@ This is the first version to include an NNUE, using 1.8.3's evaluation function 
 Formulae can be found here: https://www.desmos.com/calculator/hbrvuxpnqq
 """
 
-import chess
 import collections
+import chess
 import math
 import multiprocessing as mp
+import numpy as np
+import os
 import random as rnd
 import requests
 import sys
 import time
+import torch
 import urllib.parse
 
 from typing import Hashable
@@ -22,6 +25,15 @@ sys.setrecursionlimit(int(1e6))
 
 __version__ = '1.9'
 NAME = 'XXIEvo'
+
+# Import the Net class from the nnue module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from nnue.model import Net
+
+NNUE_PATH = os.path.join(os.path.dirname(__file__), '../nnue/net.pt')
+NNUE = Net()
+NNUE.load_state_dict(torch.load(NNUE_PATH))
+NNUE.eval()
 
 class Computer:
 
@@ -105,33 +117,29 @@ class Computer:
     def best_syzygy(self, board: chess.Board) -> chess.Move | None:
         """
         Get the best move from the Syzygy tablebase server for the given board position.
-
-        Args:
-            board (chess.Board): The chess board position to get the best move for.
-
-        Returns:
-            chess.Move: The best move from the Syzygy tablebase server.
-            None: If no best move is found.
+        Chooses moves optimally:
+            - Win  → fastest mate (lowest DTZ)
+            - Draw → safest draw (highest DTZ)
+            - Loss → longest survival (highest DTZ)
         """
-
         if not self.can_syzygy(board):
             return None
 
         response = self.syzygy_query(board)
-
         category = response["category"]
-        if category == "win":
-            anticategory = "loss"
-        elif category == "loss":
-            anticategory = "win"
-        else:
-            anticategory = "draw"
-        best_moves = [move for move in response["moves"] if move["category"] == anticategory]
-
-        if category in ["win", "draw"]:
-            best_move = best_moves[0]
-        else: # If loss, it's best to think for yourself to survive the longest
+        moves = response.get("moves", [])
+        if not moves:
             return None
+
+        if category == "win":
+            # Pick move with smallest DTZ (fastest win)
+            best_move = min(moves, key=lambda m: m.get("dtz", 0))
+        elif category == "draw":
+            # Pick safest draw (maximize DTZ)
+            best_move = max(moves, key=lambda m: m.get("dtz", 0))
+        else:  # "loss"
+            # Delay defeat as much as possible
+            best_move = max(moves, key=lambda m: m.get("dtz", 0))
 
         return chess.Move.from_uci(best_move["uci"])
 
@@ -703,7 +711,30 @@ class Computer:
 
         return best_score
 
+    @staticmethod
+    def board_to_feat_vector(board: chess.Board) -> torch.Tensor:
+        feat_vector = np.zeros(768, dtype=np.float32)
+        for square in range(64):
+            piece = board.piece_at(square)
+            if piece:
+                piece_type = piece.piece_type  # 1-6
+                color = piece.color  # chess.WHITE or chess.BLACK
+                # Index calculation: (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
+                index = (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
+                feat_vector[index] = 1.0
+        return torch.tensor(feat_vector, dtype=torch.float32)
+
     def evaluate(self, board: chess.Board) -> float:
+        """
+        Evaluate a given board using the neural network.
+        """
+
+        with torch.no_grad():
+            score = NNUE(self.board_to_feat_vector(board)).item()
+            return self.original_score(score) * 10
+
+
+    def hardcode_evaluate(self, board: chess.Board) -> float:
         """
         Evaluate the board state and return a score.
 
