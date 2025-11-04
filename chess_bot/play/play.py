@@ -405,7 +405,7 @@ class GameLoop:
             return None
         
         self.TIME_AT_START = datetime.now().strftime('%d-%m %H:%M:%S')
-        move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1} {self.TIME_AT_START}.log"
+        move_log_path = f"chess_bot/play/logs/{self.session}/G{game_count + 1} {self.TIME_AT_START}.log"
         os.makedirs(os.path.dirname(move_log_path), exist_ok=True)
         return open(move_log_path, 'w')
         
@@ -477,7 +477,7 @@ class GameLoop:
                 self.game_state.board = chess.Board(self.opening_fen)
                 
             if move_log_file is not None:
-                print(f"Game log will be saved to: chess/play/logs/{self.session}/G{game_count + 1} {datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
+                print(f"Game log will be saved to: chess_bot/play/logs/{self.session}/G{game_count + 1} {datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.log")
                 
             self.move_logger.print_and_log(
                 self.move_logger.header(self.game_state.wins, self.players, self.timeouts, self.game_state.elo_ratings)
@@ -554,7 +554,7 @@ class GameLoop:
                                       game_count, self.game_state.wins, self.players, self.opening_fen, self.game_state.elo_ratings, self.move_times)
             )
 
-            move_log_path = f"chess/play/logs/{self.session}/G{game_count + 1} {self.TIME_AT_START}.log"
+            move_log_path = f"chess_bot/play/logs/{self.session}/G{game_count + 1} {self.TIME_AT_START}.log"
             timeout_string = "-TO" if game_over else ""
             log_name = f"{move_log_path.split('.')[0]} {winner_name}{timeout_string}.log"
             os.rename(move_log_path, log_name)
@@ -610,7 +610,7 @@ class ChessGameManager:
     
     def _parse_arguments(self) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description="Play a chess game with selected bots.")
-        sys.path.insert(0, 'chess')
+        sys.path.insert(0, 'chess_bot')
         import other_bots
         player_map = {module.__name__.split('.')[-1]: module for module in other_bots.__all__}
         
@@ -675,7 +675,7 @@ class ChessGameManager:
         
     def setup_paths(self):
         """Setup system paths for imports."""
-        sys.path.insert(0, 'chess')
+        sys.path.insert(0, 'chess_bot')
         
     def _setup_players(self) -> List[Any]:
         """Setup player modules."""
@@ -693,7 +693,7 @@ class ChessGameManager:
         # Log error using GameLoop's session
         session = game_loop.session
         
-        error_dir = f"chess/play/logs/{session}"
+        error_dir = f"chess_bot/play/logs/{session}"
         if self.args.log:
             os.makedirs(error_dir, exist_ok=True)
 

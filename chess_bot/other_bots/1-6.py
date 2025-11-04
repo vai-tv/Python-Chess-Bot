@@ -28,7 +28,7 @@ class Computer:
     #                    DATABASES                   #
     ##################################################
 
-    TRANSPOSITION_PATH = f"chess/tables/{__version__}_transposition.db"
+    TRANSPOSITION_PATH = f"chess_bot/tables/{__version__}_transposition.db"
 
     @classmethod
     def init_db(cls):
@@ -355,7 +355,7 @@ class Computer:
     #                   EVALUATION                   #
     ##################################################
 
-    HEATMAP_PATH = "chess/global-assets/heatmap.json"
+    HEATMAP_PATH = "chess_bot/global-assets/heatmap.json"
     HEATMAP = json.load(open(HEATMAP_PATH))
 
     MATERIAL: dict[int, int] = {

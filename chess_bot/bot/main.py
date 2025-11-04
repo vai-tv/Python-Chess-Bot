@@ -1,5 +1,7 @@
 """
-1.8.4a, but with 1.8.3's evaluation function.
+1.9 branches from 1.8.3, as 1.8.4 performs poorly.
+
+This is the first version to include an NNUE, using 1.8.3's evaluation function as a baseline.
 
 Formulae can be found here: https://www.desmos.com/calculator/hbrvuxpnqq
 """
@@ -18,7 +20,7 @@ from typing import Hashable
 
 sys.setrecursionlimit(int(1e6))
 
-__version__ = '1.8.4b'
+__version__ = '1.9'
 NAME = 'XXIEvo'
 
 class Computer:
@@ -100,46 +102,36 @@ class Computer:
         else:
             raise requests.RequestException(f"Request to Syzygy tablebase server failed with status code {response.status_code}")
 
-    def syzygy_score(self, board: chess.Board) -> float:
-        ismaximising = board.turn == chess.WHITE
-        category = self.syzygy_query(board)["category"]
-        if category == "win":
-            return float('inf') if ismaximising else float('-inf')
-        elif category == "loss":
-            return float('-inf') if ismaximising else float('inf')
-        else:
-            return 0
-    
     def best_syzygy(self, board: chess.Board) -> chess.Move | None:
         """
         Get the best move from the Syzygy tablebase server for the given board position.
-        Chooses moves optimally:
-            - Win  → fastest mate (lowest DTZ)
-            - Draw → safest draw (highest DTZ)
-            - Loss → longest survival (highest DTZ)
+
+        Args:
+            board (chess.Board): The chess board position to get the best move for.
+
+        Returns:
+            chess.Move: The best move from the Syzygy tablebase server.
+            None: If no best move is found.
         """
+
         if not self.can_syzygy(board):
             return None
 
         response = self.syzygy_query(board)
-        category = response["category"]
-        moves = response.get("moves", [])
-        if not moves:
-            return None
 
+        category = response["category"]
         if category == "win":
-            # Pick move with smallest |DTZ| among winning moves (fastest win)
-            winning_moves = [m for m in moves if m.get("dtz", 0) != 0]
-            if winning_moves:
-                best_move = min(winning_moves, key=lambda m: abs(m.get("dtz", 0)))
-            else:
-                best_move = min(moves, key=lambda m: m.get("dtz", 0))
-        elif category == "draw":
-            # Pick safest draw (maximize DTZ)
-            best_move = max(moves, key=lambda m: m.get("dtz", 0))
-        else:  # "loss"
-            # Delay defeat as much as possible
-            best_move = max(moves, key=lambda m: m.get("dtz", 0))
+            anticategory = "loss"
+        elif category == "loss":
+            anticategory = "win"
+        else:
+            anticategory = "draw"
+        best_moves = [move for move in response["moves"] if move["category"] == anticategory]
+
+        if category in ["win", "draw"]:
+            best_move = best_moves[0]
+        else: # If loss, it's best to think for yourself to survive the longest
+            return None
 
         return chess.Move.from_uci(best_move["uci"])
 
@@ -148,7 +140,7 @@ class Computer:
         Query the opening book for the best move in the given board position.
 
         Args:
-            board (chess.Board): The chess board position to query.
+            board (chess.Board): The chess board position to query.s
 
         Returns:
             dict: The JSON response from the opening book server if successful.
@@ -393,7 +385,6 @@ class Computer:
         scored_moves.sort(key=lambda x: x[1], reverse=True)
         return [move for move, _ in scored_moves]
 
-
     ##################################################
     #                   EVALUATION                   #
     ##################################################
@@ -401,7 +392,6 @@ class Computer:
     stageEARLY = 1
     stageMIDDLE = 2
     stageLATE = 3
-    stageLATELATE = 4
 
     HEATMAP: dict[int, dict[int, list[list[float]]]] = {
         stageEARLY: {
@@ -429,7 +419,6 @@ class Computer:
             6: [[-2.0, -1.5, -1.0, -1.0, -1.0, -1.0, -1.5, -2.0], [-1.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -1.5], [-1.0, -0.5, 1.5, 1.5, 1.5, 1.5, -0.5, -1.0], [-1.0, -0.5, 1.5, 2.5, 2.5, 1.5, -0.5, -1.0], [-1.0, -0.5, 1.5, 2.5, 2.5, 1.5, -0.5, -1.0], [-1.0, -0.5, 1.5, 1.5, 1.5, 1.5, -0.5, -1.0], [-1.5, -1.25, -1.0, -0.75, -0.75, -1.0, -1.25, -1.5], [-2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0]]
         }
     }
-    HEATMAP[stageLATELATE] = HEATMAP[stageLATE] # LATELATE heatmap is the same as LATE heatmap
 
     MATERIAL: dict[int, float] = {
         chess.PAWN: 0.9,
@@ -443,17 +432,9 @@ class Computer:
     ESTIMATED_PAWN_VALUE = 40000
 
     MAX_QUIESCENCE_DEPTH = 4
-    MAX_QUIESCENCE_DEPTH_LATE = 10
+    MAX_QUIESCENCE_MOVES = 8
     MIN_PRUNE_SEARCH_DEPTH = 3 # SEARCH depth at which we start pruning the search tree
     # In other words, the tree is fully seearched x ply deep; higher values improve accuracy but seriously hurt performance
-
-    def quiescence_extend_condition(self, board: chess.Board, move: chess.Move, stage: int) -> bool:
-        if stage == Computer.stageLATELATE:
-            return board.piece_at(move.from_square) == chess.PAWN
-        elif stage == Computer.stageLATE:
-            return board.is_capture(move) or board.gives_check(move) or board.piece_at(move.from_square) == chess.PAWN
-        else:
-            return board.is_capture(move) or board.gives_check(move)
 
     def minimax(self, board: chess.Board, depth: int, alpha: float, beta: float, *,
                 original_depth: int = 0, current_path: list[chess.Move] | None = None,
@@ -503,16 +484,10 @@ class Computer:
         elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.is_repetition(count=2):
             self.leaf_nodes_explored += 1
             return 0, current_path
-        
-        if self.can_syzygy(board):
-            self.leaf_nodes_explored += 1
-            return self.syzygy_score(board), current_path
-
-        stage = self.get_game_stage(board.piece_map())
 
         # Quiescence search at leaf nodes
         if depth == 0:
-            quiescence_score = self.quiescence_search(board, alpha, beta, 0, stage=stage)
+            quiescence_score = self.quiescence_search(board, alpha, beta, 0)
             return quiescence_score, current_path
             # return self.evaluate(board), current_path
 
@@ -536,7 +511,7 @@ class Computer:
 
         # Null Move Pruning - more conservative implementation
         # Disable for late game due to zugzwang
-        if enable_pruning and depth >= 4 and not board.is_check() and stage != Computer.stageLATE:
+        if enable_pruning and depth >= 4 and not board.is_check() and self.get_game_stage(board.piece_map()) != Computer.stageLATE:
             R = 2 #depth // 3  # Adjusted reduction for null move pruning
             board.push(chess.Move.null())
             null_score, null_path = self.minimax(board, depth - 1 - R, -beta, -beta + 1, 
@@ -649,7 +624,7 @@ class Computer:
 
         return best_score, best_path
     
-    def quiescence_search(self, board: chess.Board, alpha: float, beta: float, depth: int = 0, stage: int = 0) -> float:
+    def quiescence_search(self, board: chess.Board, alpha: float, beta: float, depth: int = 0) -> float:
         """
         Quiescence search with proper alpha-beta pruning.
         Only explores captures and checks.
@@ -665,15 +640,11 @@ class Computer:
         elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.is_repetition(count=2):
             self.leaf_nodes_explored += 1
             return 0
-        
-        if self.can_syzygy(board):
-            self.leaf_nodes_explored += 1
-            return self.syzygy_score(board)
 
         stand_pat = self.evaluate(board)
 
         # Depth safeguard
-        if (depth >= self.MAX_QUIESCENCE_DEPTH and stage < Computer.stageLATE) or depth >= self.MAX_QUIESCENCE_DEPTH_LATE:
+        if depth >= self.MAX_QUIESCENCE_DEPTH:
             self.leaf_nodes_explored += 1
             return stand_pat
 
@@ -698,18 +669,18 @@ class Computer:
         if board.is_check():
             moves = list(board.legal_moves)
         else:
-            moves = [move for move in board.legal_moves if self.quiescence_extend_condition(board, move, stage)]
+            moves = [move for move in board.legal_moves if board.is_capture(move) or board.gives_check(move)]
 
         # No moves? Return stand_pat
         if not moves:
             return best_score
 
         # Order moves
-        moves = self.see_ordering(board, moves)#[:self.MAX_QUIESCENCE_MOVES]
+        moves = self.see_ordering(board, moves)[:self.MAX_QUIESCENCE_MOVES]
 
         for move in moves:
             board.push(move)
-            score = self.quiescence_search(board, alpha, beta, depth + 1, stage=stage)
+            score = self.quiescence_search(board, alpha, beta, depth + 1)
             board.pop()
 
             if is_maximizing:
@@ -1362,7 +1333,7 @@ class Computer:
         self.start_time = time.time()
         self.timeout = time_per_move or self.allocated_time(timeout, board.fullmove_number)
         stage = self.get_game_stage(board.piece_map())
-        formatted_stage = {self.stageEARLY: "opening", self.stageMIDDLE: "midgame", self.stageLATE: "endgame", self.stageLATELATE: "late endgame"}[stage]
+        formatted_stage = {self.stageEARLY: "opening", self.stageMIDDLE: "midgame", self.stageLATE: "endgame"}[stage]
 
         print(f"""
         - It's {"white" if board.turn == chess.WHITE else "black"}'s move
@@ -1599,10 +1570,8 @@ class Computer:
             return Computer.stageEARLY
         elif num_pieces >= 8:
             return Computer.stageMIDDLE
-        elif num_pieces > 2:
-            return Computer.stageLATE
         else:
-            return Computer.stageLATELATE
+            return Computer.stageLATE
 
     def allocated_time(self, t: float, m: int) -> float:
         """
@@ -1617,8 +1586,7 @@ class Computer:
         """
         if t == float('inf'):
             return self.TIME_IF_INF
-        upper_limit = t * 0.075
-        return min(upper_limit, max(0.05, (t / (20 + (40 - m)/2) + 5)))
+        return max(0.05, (t / (20 + (40 - m)/2) + 5))
 
     def is_timeup(self) -> bool:
         if self.timeout is None or self.start_time is None:
@@ -2000,8 +1968,6 @@ class Computer:
 def main():
 
     FEN = chess.STARTING_FEN
-    # FEN = "8/6kp/2p5/1p2p3/8/1P4PP/P4K2/8 w - - 0 37"
-    FEN = "8/2P3k1/4r2p/5Kp1/2B5/8/8/8 w - - 0 53"
 
     board = chess.Board(FEN)
     players = [Computer(board.turn, 7), Computer(not board.turn, 1)]

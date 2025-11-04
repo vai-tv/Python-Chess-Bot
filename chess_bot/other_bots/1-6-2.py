@@ -1,4 +1,5 @@
 import chess
+import chess.polyglot
 import json
 import random as rnd
 import requests
@@ -6,7 +7,7 @@ import sqlite3
 import time
 import urllib.parse
 
-__version__ = '1.5'
+__version__ = '1.6.2'
 
 class Computer:
 
@@ -28,7 +29,7 @@ class Computer:
     #                    DATABASES                   #
     ##################################################
 
-    TRANSPOSITION_PATH = f"chess/tables/{__version__}_transposition.db"
+    TRANSPOSITION_PATH = f"chess_bot/tables/{__version__}_transposition.db"
 
     @classmethod
     def init_db(cls):
@@ -51,7 +52,7 @@ class Computer:
         """)
         cls.cursor.execute("""
             CREATE TABLE IF NOT EXISTS winning_moves (
-                position_fen TEXT PRIMARY KEY,
+                position_zobrist TEXT PRIMARY KEY,
                 move_uci TEXT
             )
         """)
@@ -69,8 +70,7 @@ class Computer:
             The score of the board position if it exists in the database, otherwise None.
         """
         
-        # TODO: Implement zobrist
-        zobrist_key = board.fen()
+        zobrist_key = str(chess.polyglot.zobrist_hash(board))
         self.cursor.execute("SELECT score FROM transposition_table WHERE zobrist_key = ? AND depth >= ?", (zobrist_key, depth,))
         row = self.cursor.fetchone()
         if row is not None:
@@ -90,8 +90,7 @@ class Computer:
             sqlite3.Error: If there is an error saving the evaluation to the database.
         """
         
-        # TODO: Implement zobrist
-        zobrist_key = board.fen()
+        zobrist_key = str(chess.polyglot.zobrist_hash(board))
         try:
             # Check existing depth for the zobrist_key
             self.cursor.execute("SELECT depth FROM transposition_table WHERE zobrist_key = ?", (zobrist_key,))
@@ -108,6 +107,27 @@ class Computer:
                     # self.conn.commit()
         except sqlite3.Error as e:
             print(f"Error saving evaluation to DB: {e}")
+
+    def get_stored_winning_move(self, board: chess.Board) -> chess.Move | None:
+        zobrist_key = str(chess.polyglot.zobrist_hash(board))
+        self.cursor.execute("SELECT move_uci FROM winning_moves WHERE position_zobrist = ?", (zobrist_key,))
+        row = self.cursor.fetchone()
+        if row is not None:
+            try:
+                return chess.Move.from_uci(row[0])
+            except:
+                return None
+        return None
+
+    def save_winning_move(self, board_before_move: chess.Board, move: chess.Move) -> None:
+        zobrist_key = str(chess.polyglot.zobrist_hash(board_before_move))
+        move_uci = move.uci()
+        try:
+            self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_zobrist, move_uci) VALUES (?, ?)", (zobrist_key, move_uci))
+            self.conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error saving winning move to DB: {e}")
+
 
     ##################################################
     #            OPENING BOOKS AND SYGYZY            #
@@ -182,11 +202,18 @@ class Computer:
 
         url = self.OPENING_URL + fen_encoded
 
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise requests.RequestException(f"Request to opening book server failed with status code {response.status_code}")
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 429:
+                time.sleep(5)
+                return self.opening_query(board)
+            else:
+                raise requests.RequestException(f"Request to opening book server failed with status code {response.status_code}")
+
+        except requests.ConnectionError: # If max retries, no response etc, ignore
+            return {"moves": []}
 
     def random_opening_move(self, board: chess.Board) -> chess.Move | None:
         """
@@ -258,15 +285,16 @@ class Computer:
         sorted_moves = sorted(move_score_map, key=lambda x: x[1], reverse=board.turn == chess.WHITE)
         return [move for move, _ in sorted_moves]
     
-    def _turning_point(self, scores: list[float]) -> int:
+    def _turning_point(self, scores: list[float], threshold: float=0.25) -> int:
         """
-        Find the index of the 'turning point' in sorted scores by identifying the biggest gap.
+        Find the index of the 'turning point' in sorted scores by identifying the first gap that meets the threshold.
 
-        The method takes a sorted list of scores as input and returns the index after the biggest gap.
-        If the biggest gap is smaller than a threshold fraction of the score range, it returns len(scores) to keep all moves.
+        The method takes a sorted list of scores as input and returns the index after the first gap that is greater than
+        a threshold fraction of the score range.
 
         :param scores: A sorted list of scores
-        :return: The index of the turning point or len(scores) if no big gap found
+        :param threshold: The threshold fraction of the score range
+        :return: The index of the turning point or len(scores) if no qualifying gap is found
         """
 
         if not scores:
@@ -276,23 +304,14 @@ class Computer:
 
         score_range = max(scores) - min(scores)
         if score_range == 0:
-            return len(scores)
-
-        threshold_fraction = 0.15  # 15% of the score range
-
-        max_gap = -1
-        max_gap_index = 0
+            return len(scores) // 2
 
         for i in range(len(scores) - 1):
             gap = abs(scores[i] - scores[i + 1])
-            if gap > max_gap:
-                max_gap = gap
-                max_gap_index = i
+            if gap / score_range >= threshold:
+                return i + 1
 
-        if max_gap / score_range < threshold_fraction:
-            return len(scores)
-
-        return max_gap_index + 1
+        return len(scores)
 
     def select_wh_moves(self, board: chess.Board, depth: int = 0) -> list[chess.Move]:
         """
@@ -355,7 +374,7 @@ class Computer:
     #                   EVALUATION                   #
     ##################################################
 
-    HEATMAP_PATH = "chess/global-assets/heatmap.json"
+    HEATMAP_PATH = "chess_bot/global-assets/heatmap.json"
     HEATMAP = json.load(open(HEATMAP_PATH))
 
     MATERIAL: dict[int, int] = {
@@ -395,7 +414,7 @@ class Computer:
             fen = board_before_move.fen()
             move_uci = move.uci()
             try:
-                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_fen, move_uci) VALUES (?, ?)", (fen, move_uci))
+                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_zobrist, move_uci) VALUES (?, ?)", (fen, move_uci))
                 self.conn.commit()
             except sqlite3.Error as e:
                 print(f"Error saving winning move to DB: {e}")
@@ -480,6 +499,13 @@ class Computer:
         :rtype: float
         """
 
+        def cse(x: float, y: float) -> float:
+            """Complex safe exponentation."""
+            if x > 0:
+                return x ** y
+            else:
+                return -(abs(x) ** y)
+
         piece_map = board.piece_map()
 
         # Try to get score from DB
@@ -488,17 +514,14 @@ class Computer:
             return cached_score
 
         # Game over
-        if board.is_game_over():
-            # Explicitly check for draw conditions
-            if board.is_checkmate():
-                if board.result() == "1-0":
-                    return float('inf')
-                elif board.result() == "0-1":
-                    return float('-inf')
-            elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.can_claim_threefold_repetition():
+        outcome = board.outcome(claim_draw=True)
+        if outcome is not None:
+            if outcome.winner == chess.WHITE:
+                return float('inf')
+            elif outcome.winner == chess.BLACK:
+                return float('-inf')
+            else:
                 return 0
-            # fallback for other game over conditions
-            return 0
         
         stage = self.get_game_stage(board)
 
@@ -507,7 +530,20 @@ class Computer:
             if piece.piece_type == chess.PAWN:
                 PAWNS[piece.color].append(square)
 
-        KINGS = {chess.WHITE : board.king(chess.WHITE), chess.BLACK : board.king(chess.BLACK)}
+        white_king = board.king(chess.WHITE)
+        black_king = board.king(chess.BLACK)
+        if white_king is None or black_king is None:
+            return 0
+        KINGS = {chess.WHITE: white_king, chess.BLACK: black_king}
+
+        piece_weight = {
+            chess.PAWN: 0.5,
+            chess.KNIGHT: 1.5,
+            chess.BISHOP: 1.7,
+            chess.ROOK: 1.2,
+            chess.QUEEN: 1.0,
+            chess.KING: 0.3
+        }
 
         def evaluate_player(color: chess.Color) -> float:
 
@@ -532,7 +568,6 @@ class Computer:
                 
                 for square in set(attacked_squares):
                     attack_bonus += attacked_squares.count(square) ** 1.25
-                    attack_bonus **= 0.5
 
                     piece = board.piece_at(square)
                     rank = chess.square_rank(square)
@@ -551,9 +586,15 @@ class Computer:
 
                     # Reward pieces in the enemy half
                     if color == chess.WHITE and rank > 3:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[not color]
+                        attack_bonus += piece_weight[piece.piece_type] * 4 ** 0.6 * aggression[color]
                     elif color == chess.BLACK and rank < 4:
-                        attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.6 * aggression[not color]
+                        attack_bonus += piece_weight[piece.piece_type] * 4 ** 0.6 * aggression[color]
+
+                    # Penalise pieces in the back 2 ranks
+                    if color == chess.WHITE and rank < 2:
+                        attack_bonus -= piece_weight[piece.piece_type] * 3 ** 0.6 * aggression[color]
+                    elif color == chess.BLACK and rank > 5:
+                        attack_bonus -= piece_weight[piece.piece_type] * 3 ** 0.6 * aggression[color]
 
                     # Give bonuses for attacking high value pieces, give bonuses to defending low value pieces
                     if piece.color != color:
@@ -561,7 +602,7 @@ class Computer:
                     else:
                         attack_bonus += self.MATERIAL[piece.piece_type] * 2 ** 0.9 * aggression[not color]
                     
-                return attack_bonus + cover_bonus
+                return abs(attack_bonus) ** 0.5 * (abs(attack_bonus) / attack_bonus) + cover_bonus
             
             def control() -> float:
                 # Reward pieces per square control
@@ -594,15 +635,8 @@ class Computer:
                         attacks = board.attacks(square)
                         mobility_count = len(attacks)
                         # Weight mobility more heavily, with nonlinear scaling
-                        piece_weight = {
-                            chess.PAWN: 0.5,
-                            chess.KNIGHT: 1.5,
-                            chess.BISHOP: 1.7,
-                            chess.ROOK: 1.2,
-                            chess.QUEEN: 1.0,
-                            chess.KING: 0.3
-                        }.get(piece.piece_type, 1.0)
-                        mobility_score += (mobility_count ** 0.75) * piece_weight * 0.5
+                        weight = piece_weight.get(piece.piece_type, 1.0)
+                        mobility_score += (mobility_count ** 0.75) * weight * 0.5
 
                 return base_score + mobility_score
 
@@ -648,7 +682,7 @@ class Computer:
                         chess.BISHOP: [chess.C8, chess.F8]
                     }
                 }
-                for square, piece in board.piece_map().items():
+                for square, piece in piece_map.items():
                     if piece.color == color and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
                         if square not in starting_squares[color][piece.piece_type]:
                             minor_piece_development_bonus += 1.5  # Bonus for developed minor piece
@@ -663,9 +697,25 @@ class Computer:
                 king_start_square = chess.E1 if color == chess.WHITE else chess.E8
                 has_moved = king_square != king_start_square
                 if stage != 'late' and (not board.has_castling_rights(color)) and has_moved:
-                    king_penalty += 10.0
+                    king_penalty += 50.0
                 king_moves = list(board.attacks(king_square))
                 king_penalty -= len(king_moves) ** 0.5 # Penalise less for more king moves
+
+                # Additional penalty for open files near king
+                files_to_check = []
+                king_file = chess.square_file(king_square)
+                if king_file > 0:
+                    files_to_check.append(king_file - 1)
+                files_to_check.append(king_file)
+                if king_file < 7:
+                    files_to_check.append(king_file + 1)
+
+                for file in files_to_check:
+                    for rank in range(8):
+                        square = chess.square(file, rank)
+                        piece = board.piece_at(square)
+                        if piece is not None and piece.color != color and piece.piece_type in [chess.ROOK, chess.QUEEN]:
+                            king_penalty += 2.0
 
                 return king_penalty
 
@@ -715,10 +765,12 @@ class Computer:
                                 break
                     if is_passed:
                         pawn_score += 2.0
+                        if connected: # Reward connected passed pawns
+                            pawn_score += 1.0
 
                     # Reward pawns close and in front of allied king: king distance = 1
-                    if chess.square_distance(square, king_square) <= 1:
-                        pawn_score += 1.0
+                    if king_square is not None and chess.square_distance(square, king_square) <= 1 and rank > chess.square_rank(king_square):
+                        pawn_score += 1.5 if stage != "late" else 0.5 # Less important in the endgame
 
                 return pawn_score
 
@@ -729,7 +781,10 @@ class Computer:
                 # Get distance from enemy king for each piece
                 for square, piece in piece_map.items():
                     if piece.color == color:
-                        aggression_score += self.MATERIAL[piece.piece_type] / (chess.square_distance(square, enemy_king_square)) * 5
+                        dist = chess.square_distance(square, KINGS[not color])
+                        if dist == 0:
+                            dist = 1  # Avoid division by zero
+                        aggression_score += self.MATERIAL[piece.piece_type] / dist * 5
 
                 # Reward / penalise checks
                 if board.is_check():
@@ -738,39 +793,104 @@ class Computer:
                     else:
                         aggression_score += 1
 
+                # Additional bonuses for forcing moves
+                enemy_king_square = board.king(not color)
+                for move in list(board.legal_moves):
+                    # Reward checks
+                    board.push(move)
+                    if board.is_check():
+                        aggression_score += 0.5
+                    # Reward captures
+                    if board.is_capture(move):
+                        aggression_score += 0.7
+                    # Reward moves that attack opponent's king vicinity squares
+                    if enemy_king_square is not None:
+                        attacked_squares = board.attacks(move.to_square)
+                        if enemy_king_square in attacked_squares:
+                            aggression_score += 1.0
+                    board.pop()
+
+                # Apply pressure to weak or vulnerable pieces (undefended or attacked)
+                for square, piece in piece_map.items():
+                    if piece.color != color:
+                        # Check if piece is attacked by color
+                        attackers = board.attackers(color, square)
+                        defenders = board.attackers(not color, square)
+
+                        if attackers:
+                            if len(defenders) == 0:
+                                # Strongly reward attacking undefended pieces
+                                aggression_score += self.MATERIAL[piece.piece_type] * len(attackers) * 2.0
+                            else:
+                                defender = board.piece_at(next(iter(defenders)))
+                                if defender is None:
+                                    continue
+                                defender_value = self.MATERIAL[defender.piece_type]
+                                # Penalize attacking well-defended pieces unless attacker has less value
+                                if self.MATERIAL[piece.piece_type] < defender_value:
+                                    aggression_score += self.MATERIAL[piece.piece_type] * len(attackers)
+                                else:
+                                    # Penalize attacking well-defended pieces
+                                    aggression_score -= self.MATERIAL[piece.piece_type] * len(attackers) * 0.5
+
+                # Reward positions with checkmate threats
+                for move in board.legal_moves:
+                    board.push(move)
+                    if board.is_checkmate():
+                        board.pop()
+                        aggression_score += 5.0
+                        break
+                    board.pop()
+
+                # Additional bonus for beneficial trades
+                material_diff = material[color] - material[not color]
+                for move in board.legal_moves:
+                    if board.piece_at(move.to_square) is None:
+                        continue
+                    victim = board.piece_at(move.to_square)
+                    attacker = board.piece_at(move.from_square)
+                    if victim and attacker:
+                        # If trade results in material gain, reward
+                        if self.MATERIAL[victim.piece_type] < self.MATERIAL[attacker.piece_type]:
+                            aggression_score += 1.0
+                        # Encourage trading down when ahead in material
+                        if material_diff > 1.5:
+                            aggression_score += 2.0
+                        elif material_diff < 0.75:
+                            aggression_score -= 3.0
+
                 return aggression_score
 
             score = 0            
-            score -= king_safety_penalty() * 4
+            score -= king_safety_penalty() * 5.5
             score -= (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2)
-            score += (material_score() ** 2 * 20)
-            score += (coverage() ** 1.1 * 0.1) * aggression[color]
+            score += (material_score() ** 2.5 * 25)
+            score += (coverage() * 0.1) * aggression[color]
             score += heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5)
-            score += (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
+            score += (control() ** 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
             score += minor_piece_bonus() * 15 * aggression[color]
-            score += pawn_structure() * 10 * (2 if stage == 'late' else 1.5 if stage == 'early' else 1)
-            score += attack_quality() ** 1.2 * aggression[color] * 15
+            score += cse(pawn_structure(), 1.4) * 2.5 * (2 if stage == 'late' else 1.5)
+            score += attack_quality() ** 1.2 * aggression[color] * 151
 
-            # print("\nAGG", aggression[color])
-            # print("EAG", aggression[not color])
-            # print("-KSP", king_safety_penalty() * 2)
-            # print("-QPS", queen_penalty_score() / aggression[color])
-            # print("-LLP", low_legal_penalty() ** 1.5 * aggression[not color] ** 2)
-            # print("MS", material_score() ** 2 * 10)
-            # print("ATK", attack() ** 1.5 * 0.1 * aggression[color])
-            # print("HT", heatmap() ** 3 * aggression[not color])
-            # print("CTL", control() ** 1.5 * 0.35 * aggression[color])
-            # print("MPC", minor_piece_bonus() * 10 * aggression[color])
-            # print("PS", pawn_structure() * 10)
-            # print("AQ", attack_quality() * aggression[color] * 20)
-            # print("FINAL",score)
-            # input()
+            if isinstance(score, complex):
+                print("\nAGG", aggression[color])
+                print("EAG", aggression[not color])
+                print("-KSP", king_safety_penalty() * 5.5)
+                print("-LLP", (4 * low_legal_penalty()) ** 1.5 * (aggression[not color] ** 2))
+                print("+MS", material_score() ** 2 * 20)
+                print("+COV", coverage() * 0.1 * aggression[color])
+                print("+HEAT", heatmap() ** (3 if stage == 'early' else 1) * aggression[not color] * 3 * (10 if stage == 'late' else 7.5 if stage == 'early' else 5))
+                print("+CTRL", (control() * 1.25) * 0.35 * aggression[color] * (2 if stage == 'late' else 1.5 if stage == 'early' else 1))
+                print("+MIN", minor_piece_bonus() * 15 * aggression[color])
+                print("+PAWN", cse(pawn_structure(), 7/5) * 2.5 * (2 if stage == 'late' else 1.5))
+                print("+ATT", attack_quality() ** 1.2 * aggression[color] * 15)
+                raise ValueError("Score is complex")
 
             return score
         
         # Material
         material = {chess.WHITE: 1, chess.BLACK: 1} # 1 to avoid division by 0
-        for _, piece in board.piece_map().items():
+        for _, piece in piece_map.items():
             if piece.piece_type == chess.KING:
                 continue
             if piece.color == chess.WHITE:
@@ -782,7 +902,7 @@ class Computer:
         aggression = {chess.WHITE: 0.0, chess.BLACK: 0.0}
         for color in [chess.WHITE, chess.BLACK]:
             aggression[color] = min(material[color] / (2 * material[not color]), 1.5) ** 2
-            aggression[color] *= 0.5 if stage == 'early' else 1.25 if stage == 'middle' else 1
+            aggression[color] *= 0.5 if stage == 'early' else 1.75 if stage == 'middle' else 1.25
         
         # Player evaluation
         score = 0
@@ -793,6 +913,47 @@ class Computer:
         self.save_evaluation(board, score, 0)
 
         return score
+
+    def instant_response(self, board: chess.Board) -> chess.Move | None:
+        """
+        Determine an instant move for the computer player.
+
+        The method attempts to quickly return a move by checking for predefined 
+        strategies and stored winning moves:
+        1. It first attempts a random opening move.
+        2. If no opening move is available, it retrieves a move from the Syzygy 
+        endgame tablebases if possible.
+        3. Finally, it checks for a stored winning move for the current board 
+        position.
+
+        :param board: The current state of the board
+        :type board: chess.Board
+        :return: The selected move, or None if no move is available
+        :rtype: chess.Move | None
+        """
+
+        # First try a random opening move
+        opening_best = self.random_opening_move(board)
+        if opening_best is not None:
+            print("Using random opening move")
+            self.conn.close()
+            return opening_best
+
+        # Get Sygyzy best move
+        syg_best = self.best_sygyzy(board)
+        if syg_best is not None:
+            print("Using Sygzy best move")
+            self.conn.close()
+            return syg_best
+
+        # Check if there is a stored winning move for the current position
+        stored_move = self.get_stored_winning_move(board)
+        if stored_move is not None and stored_move in board.legal_moves:
+            print("Using stored winning move")
+            self.conn.close()
+            return stored_move
+    
+        return None
 
     def best_move(self, board: chess.Board, timeout: float=float('inf')) -> chess.Move | None:
         
@@ -810,55 +971,19 @@ class Computer:
         def _should_terminate(move_score_map: list[tuple[chess.Move, float]]) -> bool:
             return any(score == self.BEST_SCORE for _, score in move_score_map)
 
-        def get_stored_winning_move(board: chess.Board) -> chess.Move | None:
-            fen = board.fen()
-            self.cursor.execute("SELECT move_uci FROM winning_moves WHERE position_fen = ?", (fen,))
-            row = self.cursor.fetchone()
-            if row is not None:
-                try:
-                    return chess.Move.from_uci(row[0])
-                except:
-                    return None
-            return None
-
-        def save_winning_move(board_before_move: chess.Board, move: chess.Move) -> None:
-            fen = board_before_move.fen()
-            move_uci = move.uci()
-            try:
-                self.cursor.execute("INSERT OR REPLACE INTO winning_moves (position_fen, move_uci) VALUES (?, ?)", (fen, move_uci))
-                self.conn.commit()
-            except sqlite3.Error as e:
-                print(f"Error saving winning move to DB: {e}")
-
         self.conn = sqlite3.connect(self.TRANSPOSITION_PATH)
         self.cursor = self.conn.cursor()
+
+        instant_response = self.instant_response(board)
+        if instant_response is not None:
+            return instant_response
+        
+        ####################################################################################################
 
         print(f"{"white" if board.turn == chess.WHITE else "black"} move")
 
         self.start_time = time.time()
         self.timeout = timeout
-
-        # First try a random opening move
-        opening_best = self.random_opening_move(board)
-        if opening_best is not None:
-            print("Using random opening move")
-            self.conn.close()
-            return opening_best
-
-        # Get Sygyzy best move
-        syg_best = self.best_sygyzy(board)
-        if syg_best is not None:
-            print("Using Sygzy best move")
-            self.conn.close()
-            return syg_best
-
-
-        # Check if there is a stored winning move for the current position
-        stored_move = get_stored_winning_move(board)
-        if stored_move is not None and stored_move in board.legal_moves:
-            print("Using stored winning move")
-            self.conn.close()
-            return stored_move
 
         depth = 1
         best_move = None
@@ -878,11 +1003,11 @@ class Computer:
             moves = [move for move, _ in move_score_map]
 
             # Gradually filter out based on the previous scores
-            if depth > 2:
-                turning_point = self._turning_point([score for _, score in move_score_map])
+            if depth > 1:
+                turning_point = self._turning_point([score for _, score in move_score_map], threshold=0.5 if depth == 2 else 0.1)
                 move_score_map = move_score_map[:turning_point]
                 moves = moves[:turning_point]
-                print(len(moves),"moves to look at:",[board.san(m) for m in moves])
+            print(len(moves),"moves to look at:",[board.san(m) for m in moves])
 
             # If only one move left, return it
             if len(moves) == 1:
@@ -950,11 +1075,19 @@ class Computer:
 
                 self.save_evaluation(board, score, depth)
 
+                # Remove moves that lead to checkmates
+                if score == self.WORST_SCORE:
+                    del move_score_dict[move]
+
                 if _should_terminate(list(move_score_dict.items())):
                     print("TERMINATED EARLY")
                     break
             
             print()
+
+            if not move_score_dict:
+                print("No moves left, returning random move")
+                return rnd.choice(list(board.legal_moves))
 
             # Update move_score_map from the dictionary for next iteration
             move_score_map = list(move_score_dict.items())
@@ -965,7 +1098,7 @@ class Computer:
                 best_move = current_best_move if current_best_move is not None else maxmin(move_score_map, key=lambda x: x[1])[0]
 
                 # Save the winning move and the position before the move
-                save_winning_move(board, best_move)
+                self.save_winning_move(board, best_move)
                 break
 
             best_move = current_best_move if current_best_move is not None else maxmin(move_score_map, key=lambda x: x[1])[0]
