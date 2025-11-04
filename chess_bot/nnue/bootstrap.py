@@ -1,0 +1,183 @@
+import sys
+sys.path.insert(0, 'chess_bot')
+
+import chess
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import torch.utils.data as data
+import numpy as np
+
+import random as rnd
+from tqdm import tqdm
+
+from bot.main import Computer
+
+####################################################################################################
+# TRAINING DATA AND CONSTANTS
+
+LEARNING_RATE = 1e-3
+EPOCHS = int(1e3)
+BATCH_SIZE = 64
+
+C = Computer(chess.WHITE)
+evaluate = C.evaluate
+
+np.random.RandomState(1)
+
+####################################################################################################
+# MODEL
+
+class Net(nn.Module):
+
+    INPUT_FEATURES = 768
+    OUTPUT_FEATURES = 1
+
+    NET_PATH = "chess_bot/nnue/net.pt"
+
+    def __init__(self, hidden_sizes: list[int] = [256, 128, 8]):
+        super(Net, self).__init__()
+
+        # generate hidden layers
+        self.hidden_layers = nn.ModuleList()
+        in_feat = self.INPUT_FEATURES
+        for i in range(len(hidden_sizes)):
+            layer = nn.Linear(in_feat, hidden_sizes[i])
+            self.hidden_layers.append(layer)
+            self.hidden_layers.append(nn.ReLU())
+            in_feat = hidden_sizes[i]
+
+        # generate output layer
+        self.output_layer = nn.Linear(hidden_sizes[-1], 1)
+
+    def forward(self, x):
+        for layer in self.hidden_layers:
+            x = layer(x)
+        return self.output_layer(x)
+
+    def board_to_feat_vector(self, board: chess.Board) -> torch.Tensor:
+        feat_vector = np.zeros(768, dtype=np.float32)
+        for square in range(64):
+            piece = board.piece_at(square)
+            if piece:
+                piece_type = piece.piece_type  # 1-6
+                color = piece.color  # chess.WHITE or chess.BLACK
+                # Index calculation: (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
+                index = (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
+                feat_vector[index] = 1.0
+        return torch.tensor(feat_vector, dtype=torch.float32)
+    
+    def save(self):
+        torch.save(self.state_dict(), self.NET_PATH)
+    
+    def load(self):
+        self.load_state_dict(torch.load(self.NET_PATH))
+
+    def random(self):
+        """Fill the network with random weights."""
+
+        for layer in self.hidden_layers:
+            if isinstance(layer, nn.Linear):
+                torch.nn.init.xavier_uniform_(layer.weight)
+                torch.nn.init.zeros_(layer.bias)
+
+        torch.nn.init.xavier_uniform_(self.output_layer.weight)
+        torch.nn.init.zeros_(self.output_layer.bias)
+        
+
+net = Net()
+criterion = nn.SmoothL1Loss()
+
+try:
+    net.load()
+except FileNotFoundError:
+    print("Could not find net, using random weights")
+    net.random()
+optimiser = optim.Adam(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+
+
+####################################################################################################
+# TRAINING
+
+def random_board() -> chess.Board:
+    board = chess.Board()
+    for i in range(0, np.random.randint(0, 100)):
+        legal_moves = list(board.legal_moves)
+        move = rnd.choice(legal_moves)
+        board.push(move)
+
+        if board.is_game_over():
+            break
+
+    return board
+
+def XY_pair() -> tuple[torch.Tensor, torch.Tensor]:
+    board = random_board()
+
+    # evaluate the board
+    value = C.normalise_score(evaluate(board)) / 10
+
+    # convert the board to a feature vector
+    feat_vector = net.board_to_feat_vector(board)
+
+    # return the feature vector and the value
+    return feat_vector, torch.tensor([value], dtype=torch.float32)
+
+def XY_batch() -> tuple[torch.Tensor, torch.Tensor]:
+    """Similar to XY_pair, but returns a batch of feature vectors and values."""
+
+    feat_vectors = []
+    values = []
+    for _ in range(BATCH_SIZE):
+        feat_vector, value = XY_pair()
+        feat_vectors.append(feat_vector)
+        values.append(value)
+
+    return torch.stack(feat_vectors), torch.stack(values)
+
+
+def train(n: int):
+    pbar = tqdm(range(n), desc="Training NNUE")
+    for i in pbar:
+        try:
+            feat_vector, value = XY_batch()
+            optimiser.zero_grad()
+            output = net(feat_vector)
+            criterion(output, value).backward()
+            optimiser.step()
+
+            if i % (EPOCHS / 100) == 0:
+                pbar.set_postfix(loss=f"{criterion(output, value).item():.4f}")
+            if i % (EPOCHS / 10) == 0:
+                sample(3)
+        
+        except (Exception, KeyboardInterrupt) as e:
+            print("Error! Saving net...")
+            net.save()
+            raise e
+
+    print("Saving net...")
+    net.save()
+
+
+def sample(n: int):
+    """Sample the net by passing in a random position and comparing the returned evaluation."""
+
+    for _ in range(n):
+        board = random_board()
+
+        # evaluate the board
+        value = C.normalise_score(evaluate(board)) / 10
+
+        # convert the board to a feature vector
+        feat_vector = net.board_to_feat_vector(board)
+
+        # return the feature vector and the value
+        output = net(feat_vector)
+        print(f"""T {value:.2f} | E {output.item():.2f} | e {round(output.item() - value, 2)}""")
+
+
+while True:
+    train(EPOCHS)
