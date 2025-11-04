@@ -8,7 +8,7 @@ class Net(nn.Module):
     INPUT_FEATURES = 768
     OUTPUT_FEATURES = 1
 
-    NET_PATH = "chess_bot/nnue/net.pt"
+    net_path = "chess_bot/nnue/net.pt"
 
     def __init__(self, hidden_sizes: list[int] = [256, 128, 8]):
         super(Net, self).__init__()
@@ -42,11 +42,11 @@ class Net(nn.Module):
                 feat_vector[index] = 1.0
         return torch.tensor(feat_vector, dtype=torch.float32)
 
-    def save(self):
-        torch.save(self.state_dict(), self.NET_PATH)
+    def save(self, path: str = net_path):
+        torch.save(self.state_dict(), path)
 
-    def load(self):
-        self.load_state_dict(torch.load(self.NET_PATH))
+    def load(self, path: str = net_path):
+        self.load_state_dict(torch.load(path))
 
     def random(self):
         """Fill the network with random weights."""

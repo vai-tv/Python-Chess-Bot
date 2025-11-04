@@ -23,7 +23,7 @@ EPOCHS = int(1e3)
 BATCH_SIZE = 64
 
 C = Computer(chess.WHITE)
-evaluate = C.evaluate
+evaluate = C.hardcode_evaluate
 
 np.random.RandomState(1)
 
@@ -33,6 +33,7 @@ np.random.RandomState(1)
 from nnue.model import Net
 
 net = Net()
+net.net_path = "chess_bot/nnue/bootstrap.pt"
 criterion = nn.SmoothL1Loss()
 
 try:
