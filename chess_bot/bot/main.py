@@ -1598,6 +1598,9 @@ class Computer:
     def normalise_score(self, score: float) -> float:
         return round(score / self.ESTIMATED_PAWN_VALUE, 2)
 
+    def original_score(self, score: float) -> float:
+        return round(score * self.ESTIMATED_PAWN_VALUE, 2)
+
     def reset_metrics(self) -> None:
         self.nodes_explored = 0
         self.leaf_nodes_explored = 0
