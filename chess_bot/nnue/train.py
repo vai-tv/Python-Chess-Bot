@@ -2,18 +2,18 @@ import sys
 sys.path.insert(0, 'chess_bot')
 
 import argparse
-
 import chess
+import json
+import multiprocessing
+import numpy as np
+import os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data as data
-import numpy as np
-import os
 
-import random as rnd
 from tqdm import tqdm
 
 from bot.main import Computer
@@ -47,26 +47,27 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimiser, mode='min', factor=0
 ####################################################################################################
 # TRAINING
 
-def random_board() -> chess.Board:
-    board = chess.Board()
-    for i in range(0, np.random.randint(100, 300)):
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            break
-        move = rnd.choice(legal_moves)
-        board.push(move)
+OPENING_BOOK_PATH = "chess_bot/play/openings.json"
 
-        if board.is_game_over():
-            break
+def random_start_board() -> chess.Board:
+    """Select a random starting position from the opening book."""
 
-    return board
+    with open(OPENING_BOOK_PATH, "r") as f:
+        openings = json.load(f)
 
-def play_game() -> tuple[list[torch.Tensor], list[float]]:
+    random_opening = np.random.choice(openings["15"])
+    
+    return chess.Board(random_opening)
+
+def play_game(silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
     """
     Play a game between two instances of the computer using NNUE evaluation.
     Collect all positions and their evaluations.
     """
-    board = chess.Board()
+    board = random_start_board()
+    if not silent:
+        print("Starting position:", board.fen())
+
     positions = []
     evaluations = []
 
@@ -83,14 +84,28 @@ def play_game() -> tuple[list[torch.Tensor], list[float]]:
         positions.append(net.board_to_feat_vector(board))
         evaluations.append(C.nnue_normalise_score(eval_score))
 
-        move = current_computer.best_move(board, time_per_move=10)  # Short timeout for training
+        # Variable move time: early game 2s, midgame 5s, endgame 10s
+        ply = board.ply()
+        if ply < 20:
+            time_per_move = 2
+        elif ply < 60:
+            time_per_move = 5
+        else:
+            time_per_move = 10
+
+        if silent:
+            sys.stdout = open(os.devnull, 'w')
+        move = current_computer.best_move(board, time_per_move=time_per_move)
+        if silent:
+            sys.stdout = sys.__stdout__
 
         if move is None:
             break
 
-        print(board.san(move))
+        if not silent:
+            print(board.san(move))
+            print(board)
         board.push(move)
-        print(board)
 
     # Determine the game result
     if board.is_checkmate():
@@ -112,23 +127,34 @@ def play_game() -> tuple[list[torch.Tensor], list[float]]:
 
     return positions, targets
 
+def collect_data(n: int, silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
+    """
+    Collect training data by playing games in parallel.
+    """
+    print("Collecting training data...")
+
+    if silent:
+        sys.stdout = open(os.devnull, 'w')
+
+    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+        results = list(tqdm(pool.imap(play_game, [silent] * n), total=n))
+
+    if silent:
+        sys.stdout = sys.__stdout__
+    
+    all_positions = []
+    all_targets = []
+    for positions, targets in results:
+        all_positions.extend(positions)
+        all_targets.extend(targets)
+    return all_positions, all_targets
+
 def train(n: int, silent: bool=False):
     """
     Train the NNUE network by playing games and collecting data.
     """
     net.train()
-    all_positions = []
-    all_targets = []
-
-    print("Collecting training data...")
-    for _ in tqdm(range(n)):
-        if silent:
-            sys.stdout = open(os.devnull, 'w')
-        positions, targets = play_game()
-        if silent:
-            sys.stdout = sys.__stdout__
-        all_positions.extend(positions)
-        all_targets.extend(targets)
+    all_positions, all_targets = collect_data(n, silent)
 
     # Split into train and validation sets
     train_size = int(0.8 * len(all_positions))
