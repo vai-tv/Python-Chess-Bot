@@ -198,6 +198,10 @@ if __name__ == "__main__":
     parser.add_argument('-s', '--silent', action='store_true', help='Specify to disable information regarding the gameplay, including board positions.')
     args = parser.parse_args()
 
+    if args.name is None:
+        print("Please specify a name for the net to load.")
+        exit(1)
+
     # Load the net based on the argument
     try:
         path = "chess_bot/nnue/nets/" + args.name + ".pt"
