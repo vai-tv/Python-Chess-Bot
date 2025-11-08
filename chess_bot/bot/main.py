@@ -30,9 +30,20 @@ NAME = 'XXIEvo'
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from nnue.model import Net
 
-NNUE_PATH = os.path.join(os.path.dirname(__file__), '../nnue/net.pt')
+NNUE_PATH = os.path.join(os.path.dirname(__file__), '../nnue/nets/')
 NNUE = Net()
-NNUE.load_state_dict(torch.load(NNUE_PATH))
+
+hardcode = False
+if os.path.exists(NNUE_PATH + "best_net.pt"):
+    NNUE.load_state_dict(torch.load(NNUE_PATH + "net.pt"))
+elif os.path.exists(NNUE_PATH + "net.pt"):
+    NNUE.load_state_dict(torch.load(NNUE_PATH + "net.pt"))
+elif os.path.exists(NNUE_PATH + "bootstrap.pt"):
+    NNUE.load_state_dict(torch.load(NNUE_PATH + "bootstrap.pt")) # Bootstrap fallback
+else:
+    print("No net found, using hardcode")
+    hardcode = True
+    
 NNUE.eval()
 
 class Computer:
@@ -713,7 +724,7 @@ class Computer:
 
     @staticmethod
     def board_to_feat_vector(board: chess.Board) -> torch.Tensor:
-        feat_vector = np.zeros(768, dtype=np.float32)
+        feat_vector = np.zeros(781, dtype=np.float32)
         for square in range(64):
             piece = board.piece_at(square)
             if piece:
@@ -729,10 +740,19 @@ class Computer:
         Evaluate a given board using the neural network.
         """
 
+        if hardcode:
+            return self.hardcode_evaluate(board)
+
         with torch.no_grad():
             score = NNUE(self.board_to_feat_vector(board)).item()
-            return self.original_score(score) * 10
+            return self.nnue_reverse_normalise_score(score)
 
+    def nnue_normalise_score(self, x: float) -> float:
+        """Normalise a given evaluation score such that it is appropriate for the NNUE."""
+        return x / self.ESTIMATED_PAWN_VALUE / 5
+    def nnue_reverse_normalise_score(self, x: float) -> float:
+        """Obtain the original score from an NNUE-normalised score."""
+        return x * self.ESTIMATED_PAWN_VALUE * 5
 
     def hardcode_evaluate(self, board: chess.Board) -> float:
         """
@@ -1390,7 +1410,7 @@ class Computer:
         # Sort by the MVV-LVA heuristic
         move_score_map.sort(key=lambda x: self.mvv_lva_score(board, x[0]), reverse=True)
 
-        while not self.is_timeup():
+        while not self.is_timeup() and depth <= 100: # Depth limit to prevent depth explosion when close to a lot of terminals
 
             print(f"""\nDEPTH {depth}: """,end='\t')
 
