@@ -20,7 +20,7 @@ from bot.main import Computer
 
 LEARNING_RATE = 1e-3
 EPOCHS = int(1e3)
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 
 C = Computer(chess.WHITE)
 evaluate = C.hardcode_evaluate
@@ -33,15 +33,15 @@ np.random.RandomState(1)
 from nnue.model import Net
 
 net = Net()
-net.net_path = "chess_bot/nnue/bootstrap.pt"
+net_path = "chess_bot/nnue/nets/bootstrap.pt"
 criterion = nn.SmoothL1Loss()
 
 try:
-    net.load()
+    net.load(net_path)
 except FileNotFoundError:
     print("Could not find net, using random weights")
     net.random()
-optimiser = optim.Adam(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+optimiser = optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
 
 ####################################################################################################
@@ -49,8 +49,10 @@ optimiser = optim.Adam(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
 
 def random_board() -> chess.Board:
     board = chess.Board()
-    for i in range(0, np.random.randint(100, 200)):
+    for i in range(0, np.random.poisson(25, size=2)[0]):
         legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            break
         move = rnd.choice(legal_moves)
         board.push(move)
 
@@ -63,10 +65,10 @@ def XY_pair() -> tuple[torch.Tensor, torch.Tensor]:
     board = random_board()
 
     # evaluate the board
-    value = C.normalise_score(evaluate(board)) / 10
+    value = C.nnue_normalise_score(evaluate(board))
 
     # convert the board to a feature vector
-    feat_vector = C.board_to_feat_vector(board)
+    feat_vector = net.board_to_feat_vector(board)
 
     # return the feature vector and the value
     return feat_vector, torch.tensor([value], dtype=torch.float32)
@@ -76,11 +78,11 @@ def XY_batch() -> tuple[torch.Tensor, torch.Tensor]:
 
     feat_vectors = []
     values = []
+
     for _ in range(BATCH_SIZE):
         feat_vector, value = XY_pair()
         feat_vectors.append(feat_vector)
         values.append(value)
-
     return torch.stack(feat_vectors), torch.stack(values)
 
 
@@ -91,39 +93,44 @@ def train(n: int):
             feat_vector, value = XY_batch()
             optimiser.zero_grad()
             output = net(feat_vector)
-            criterion(output, value).backward()
+            loss = criterion(output, value)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=0.5)
             optimiser.step()
 
-            if i % (EPOCHS / 100) == 0:
-                pbar.set_postfix(loss=f"{criterion(output, value).item():.4f}")
-            if i % (EPOCHS / 10) == 0:
+            if i % (EPOCHS // 100) == 0:
+                pbar.set_postfix(loss=f"{loss.item():.4f}")
+            if i % (EPOCHS // 10) == 0:
                 sample(3)
-        
+
         except (Exception, KeyboardInterrupt) as e:
             print("Error! Saving net...")
-            net.save()
+            net.save(net_path)
             raise e
 
     print("Saving net...")
-    net.save()
+    net.save(net_path)
 
 
 def sample(n: int):
     """Sample the net by passing in a random position and comparing the returned evaluation."""
 
+    print()
     for _ in range(n):
         board = random_board()
 
         # evaluate the board
-        value = C.normalise_score(evaluate(board)) / 10
+        value = C.nnue_normalise_score(evaluate(board))
 
         # convert the board to a feature vector
-        feat_vector = C.board_to_feat_vector(board)
+        feat_vector = net.board_to_feat_vector(board)
 
         # return the feature vector and the value
-        output = net(feat_vector)
-        print(f"""T {value:.2f} | E {output.item():.2f} | e {round(output.item() - value, 2)}""")
+        output = net(feat_vector).item()
+        print(f"""T {value:.2f} | E {output:.2f} | e {round(output - value, 2)}""")
+        # print(board)
 
 
-while True:
-    train(EPOCHS)
+if __name__ == '__main__':
+    while True:
+        train(EPOCHS)
