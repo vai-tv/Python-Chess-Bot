@@ -39,6 +39,8 @@ def main(num_positions: int):
     boards = [uniform_random_board() for _ in range(num_positions)]
     hardcode_scores = [C.hardcode_evaluate(board) for board in boards]
     normalised_hc = [C.normalise_score(score) for score in hardcode_scores]
+    min_hc = min(normalised_hc)
+    max_hc = max(normalised_hc)
 
     all_nnue_scores = []
 
@@ -60,14 +62,16 @@ def main(num_positions: int):
                 board = boards[i]
 
                 # NNUE evaluation
-                nnue_score = C.evaluate(board)
-                nnue_normalised = C.normalise_score(nnue_score)
+                nnue_score = net(C.board_to_feat_vector(board)).item()
+                nnue_raw = C.nnue_reverse_normalise_score(nnue_score)
+                nnue_normalised = C.normalise_score(nnue_raw)
                 nnue_scores.append(nnue_normalised)
 
         all_nnue_scores.append((net_file, nnue_scores))
 
         ax = axes[idx]
         ax.scatter(normalised_hc, nnue_scores, alpha=0.5)
+        ax.plot([min_hc, max_hc], [min_hc, max_hc], 'r--', label='y=x')
         ax.set_xlabel('Hardcode Evaluation')
         ax.set_ylabel('NNUE Prediction')
         ax.set_title(f'{net_file}')
@@ -79,6 +83,7 @@ def main(num_positions: int):
     for i, (net_file, nnue_scores) in enumerate(all_nnue_scores):
         color = colors[i % len(colors)]
         ax_combined.scatter(normalised_hc, nnue_scores, alpha=0.5, color=color, label=net_file)
+    ax_combined.plot([min_hc, max_hc], [min_hc, max_hc], 'k--', label='y=x')
     ax_combined.set_xlabel('Hardcode Evaluation')
     ax_combined.set_ylabel('NNUE Prediction')
     ax_combined.set_title('Combined All Nets')
