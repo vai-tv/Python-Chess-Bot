@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 import torch.utils.data as data
 import numpy as np
 
@@ -18,7 +19,7 @@ from bot.main import Computer
 ####################################################################################################
 # TRAINING DATA AND CONSTANTS
 
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 5e-3
 EPOCHS = int(1e3)
 BATCH_SIZE = 128
 
@@ -42,6 +43,7 @@ except FileNotFoundError:
     print("Could not find net, using random weights")
     net.random()
 optimiser = optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+scheduler = lr_scheduler.ReduceLROnPlateau(optimiser, mode='min', factor=0.8, patience=100)
 
 
 ####################################################################################################
@@ -71,7 +73,7 @@ def XY_pair() -> tuple[torch.Tensor, torch.Tensor]:
     feat_vector = net.board_to_feat_vector(board)
 
     # return the feature vector and the value
-    return feat_vector, torch.tensor([value], dtype=torch.float32)
+    return feat_vector, torch.tensor(value, dtype=torch.float32)
 
 def XY_batch() -> tuple[torch.Tensor, torch.Tensor]:
     """Similar to XY_pair, but returns a batch of feature vectors and values."""
@@ -88,7 +90,7 @@ def XY_batch() -> tuple[torch.Tensor, torch.Tensor]:
 
 def train(n: int):
     pbar = tqdm(range(n), desc="Training NNUE")
-    for i in pbar:
+    for _ in pbar:
         try:
             feat_vector, value = XY_batch()
             optimiser.zero_grad()
@@ -97,11 +99,8 @@ def train(n: int):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=0.5)
             optimiser.step()
-
-            if i % (EPOCHS // 100) == 0:
-                pbar.set_postfix(loss=f"{loss.item():.4f}")
-            if i % (EPOCHS // 10) == 0:
-                sample(3)
+            scheduler.step(loss.detach())
+            pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{optimiser.param_groups[0]['lr']:.6f}")       
 
         except (Exception, KeyboardInterrupt) as e:
             print("Error! Saving net...")
@@ -110,6 +109,7 @@ def train(n: int):
 
     print("Saving net...")
     net.save(net_path)
+    sample(3)
 
 
 def sample(n: int):
