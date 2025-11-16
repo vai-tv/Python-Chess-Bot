@@ -8,7 +8,7 @@ class Net(nn.Module):
     INPUT_FEATURES = 768 + 4 + 8 + 1  # Pieces + castling + en passant + side to move
     OUTPUT_FEATURES = 1
 
-    def __init__(self, hidden_sizes: list[int] = [256, 128, 96, 32], dropout_rate: float = 0.3):
+    def __init__(self, hidden_sizes: list[int] = [128, 64, 32, 16], dropout_rate: float = 0.5):
         super(Net, self).__init__()
 
         self.linears = nn.ModuleList()
@@ -28,7 +28,6 @@ class Net(nn.Module):
         self.output_layer = nn.Linear(hidden_sizes[-1], 1)
 
     def forward(self, x):
-        x = x.unsqueeze(0)  # Add batch dimension
         for linear, norm, dropout, residual in zip(self.linears, self.norms, self.dropouts, self.residuals):
             out = linear(x)
             out = norm(out)
@@ -37,7 +36,7 @@ class Net(nn.Module):
             res = residual(x)
             x = out + res
         x = self.output_layer(x)
-        return x.squeeze(0)  # Remove batch dimension
+        return x.squeeze(-1)
 
     def board_to_feat_vector(self, board: chess.Board) -> torch.Tensor:
         feat_vector = np.zeros(self.INPUT_FEATURES, dtype=np.float32)
