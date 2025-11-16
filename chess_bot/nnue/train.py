@@ -22,9 +22,9 @@ from bot.main import Computer
 # TRAINING DATA AND CONSTANTS
 
 LEARNING_RATE = 1e-4
-EPOCHS = 10
-BATCH_SIZE = 64
-GAMMA = 0.99  # Discount factor for gamma weighting
+EPOCHS = 50
+BATCH_SIZE = 128
+GAMMA = 0.95  # Discount factor for gamma weighting
 
 C = Computer(chess.WHITE)
 nnue_evaluate = C.evaluate
@@ -39,10 +39,7 @@ from nnue.model import Net
 
 net = Net()
 criterion = nn.SmoothL1Loss()
-optimiser = optim.Adam(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-3)
-
-# Learning rate scheduler
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimiser, mode='min', factor=0.5, patience=5)
+optimiser = optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-3)
 
 ####################################################################################################
 # TRAINING
@@ -59,6 +56,36 @@ def random_start_board() -> chess.Board:
     
     return chess.Board(random_opening)
 
+def augment_feat_vector(feat_vector: torch.Tensor, target: float) -> list[tuple[torch.Tensor, float]]:
+    """Generate augmented feature vectors and targets by applying both augmentations."""
+    augmented = [(feat_vector, target)]  # Original
+
+    # Horizontal flip: swap files a-h, b-g, etc., ignoring last 13 special bits
+    flipped = feat_vector.clone()
+    # Pieces: 768 features, 6 types * 2 colors * 64 squares
+    for piece_type in range(6):
+        for color in range(2):
+            for rank in range(8):
+                for file in range(8):
+                    orig_idx = piece_type * 128 + color * 64 + rank * 8 + file
+                    new_file = 7 - file
+                    new_idx = piece_type * 128 + color * 64 + rank * 8 + new_file
+                    flipped[orig_idx], flipped[new_idx] = flipped[new_idx], flipped[orig_idx]
+    augmented.append((flipped, target))
+
+    # Color swap: swap white and black pieces, reverse the target
+    swapped = feat_vector.clone()
+    # Swap white and black for each piece type and square
+    for piece_type in range(6):
+        for rank in range(8):
+            for file in range(8):
+                white_idx = piece_type * 128 + 0 * 64 + rank * 8 + file  # color 0: white
+                black_idx = piece_type * 128 + 1 * 64 + rank * 8 + file  # color 1: black
+                swapped[white_idx], swapped[black_idx] = swapped[black_idx], swapped[white_idx]
+    augmented.append((swapped, -target))
+
+    return augmented
+
 def play_game(silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
     """
     Play a game between two instances of the computer using NNUE evaluation.
@@ -72,8 +99,9 @@ def play_game(silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
     evaluations = []
 
     # Create two computer instances, one for white, one for black
-    white_computer = Computer(chess.WHITE)
-    black_computer = Computer(chess.BLACK)
+    # Set workers=1 to avoid multiprocessing issues in daemonic processes
+    white_computer = Computer(chess.WHITE, workers=1)
+    black_computer = Computer(chess.BLACK, workers=1)
 
     while not board.is_game_over(claim_draw=True):
         # Get the current player
@@ -81,15 +109,16 @@ def play_game(silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
 
         # Evaluate the current position with hardcode evaluation
         eval_score = hardcode_evaluate(board)
-        positions.append(net.board_to_feat_vector(board))
+        feat_vector = net.board_to_feat_vector(board)
+        positions.append(feat_vector)
         evaluations.append(C.nnue_normalise_score(eval_score))
 
         # Variable move time: early game 2s, midgame 5s, endgame 10s
         ply = board.ply()
         if ply < 20:
-            time_per_move = 2
-        elif ply < 60:
             time_per_move = 5
+        elif ply < 60:
+            time_per_move = 7.5
         else:
             time_per_move = 10
 
@@ -110,22 +139,34 @@ def play_game(silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
     # Determine the game result
     if board.is_checkmate():
         if board.turn == chess.WHITE:
-            result = -1.0  # Black wins
+            result = -1e6  # Black wins
         else:
-            result = 1.0   # White wins
+            result = 1e6   # White wins
     else:
         result = 0.0  # Draw
+
+    # Normalize the result to match the evaluation scale
+    result = C.nnue_normalise_score(result)
 
     # Apply gamma weighting to targets
     targets = []
     for i in range(len(evaluations)):
         # Weight the evaluation towards the game result
         # Closer positions to the end have higher weight on the result
-        weight = GAMMA ** (len(evaluations) - 1 - i)
+        weight = GAMMA ** (len(evaluations) // 4 - 1 - i // 4)  # Adjust for augmented positions
         target = (1 - weight) * evaluations[i] + weight * result
         targets.append(target)
 
-    return positions, targets
+    # Augment data
+    augmented_positions = []
+    augmented_targets = []
+    for pos, targ in zip(positions, targets):
+        augmented = augment_feat_vector(pos, targ)
+        for aug_pos, aug_targ in augmented:
+            augmented_positions.append(aug_pos)
+            augmented_targets.append(aug_targ)
+
+    return augmented_positions, augmented_targets
 
 def collect_data(n: int, silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
     """
@@ -141,7 +182,7 @@ def collect_data(n: int, silent: bool = False) -> tuple[list[torch.Tensor], list
 
     if silent:
         sys.stdout = sys.__stdout__
-    
+
     all_positions = []
     all_targets = []
     for positions, targets in results:
@@ -149,30 +190,38 @@ def collect_data(n: int, silent: bool = False) -> tuple[list[torch.Tensor], list
         all_targets.extend(targets)
     return all_positions, all_targets
 
-def train(n: int, silent: bool=False):
+def train_model(all_positions: list[torch.Tensor], all_targets: list[float], silent: bool = False):
     """
-    Train the NNUE network by playing games and collecting data.
+    Train the NNUE network on the provided data.
     """
-    net.train()
-    all_positions, all_targets = collect_data(n, silent)
+    if not all_positions:
+        print("No data to train on.")
+        return
 
-    # Split into train and validation sets
-    train_size = int(0.8 * len(all_positions))
-    val_size = len(all_positions) - train_size
-    train_positions, val_positions = all_positions[:train_size], all_positions[train_size:]
-    train_targets, val_targets = all_targets[:train_size], all_targets[train_size:]
+    # Split into train, validation, and test sets
+    train_size = int(0.7 * len(all_positions))
+    val_size = int(0.2 * len(all_positions))
+    test_size = len(all_positions) - train_size - val_size
+    train_positions, val_positions, test_positions = all_positions[:train_size], all_positions[train_size:train_size+val_size], all_positions[train_size+val_size:]
+    train_targets, val_targets, test_targets = all_targets[:train_size], all_targets[train_size:train_size+val_size], all_targets[train_size+val_size:]
 
     # Create datasets and dataloaders
     train_dataset = data.TensorDataset(torch.stack(train_positions), torch.tensor(train_targets, dtype=torch.float32))
     val_dataset = data.TensorDataset(torch.stack(val_positions), torch.tensor(val_targets, dtype=torch.float32))
+    test_dataset = data.TensorDataset(torch.stack(test_positions), torch.tensor(test_targets, dtype=torch.float32))
     train_dataloader = data.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_dataloader = data.DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_dataloader = data.DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    print(f"Training on {len(train_dataset)} positions, validating on {len(val_dataset)} positions...")
+    print(f"Training on {len(train_dataset)} positions, validating on {len(val_dataset)} positions, testing on {len(test_dataset)} positions...")
 
-    best_val_loss = float('inf')
-    patience = 7
+    # Reset learning rate and scheduler for each training session
+    optimiser.param_groups[0]['lr'] = LEARNING_RATE
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimiser, T_0=10, T_mult=2)
+
+    patience = 10
     patience_counter = 0
+    best_val_loss = float('inf')
 
     for epoch in range(EPOCHS):
         # Training loop
@@ -181,9 +230,9 @@ def train(n: int, silent: bool=False):
         for batch_positions, batch_targets in train_dataloader:
             optimiser.zero_grad()
             outputs = net(batch_positions)
-            loss = criterion(outputs.squeeze(), batch_targets)
+            loss = criterion(outputs, batch_targets)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=0.5)
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=0.75)
             optimiser.step()
             epoch_train_loss += loss.item()
 
@@ -193,7 +242,7 @@ def train(n: int, silent: bool=False):
         with torch.no_grad():
             for batch_positions, batch_targets in val_dataloader:
                 outputs = net(batch_positions)
-                loss = criterion(outputs.squeeze(), batch_targets)
+                loss = criterion(outputs, batch_targets)
                 epoch_val_loss += loss.item()
 
         avg_train_loss = epoch_train_loss / len(train_dataloader)
@@ -201,7 +250,7 @@ def train(n: int, silent: bool=False):
             avg_val_loss = epoch_val_loss / len(val_dataloader)
         else:
             avg_val_loss = float('inf')
-        scheduler.step(avg_val_loss)  # Update learning rate based on validation loss
+        scheduler.step(epoch)  # Update learning rate with cosine annealing
         print(f"Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
         # Early stopping
@@ -215,6 +264,28 @@ def train(n: int, silent: bool=False):
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
+
+    # Final test evaluation
+    try:
+        net.load("chess_bot/nnue/nets/best_net.pt")
+        net.eval()
+        test_loss = 0.0
+        with torch.no_grad():
+            for batch_positions, batch_targets in test_dataloader:
+                outputs = net(batch_positions)
+                loss = criterion(outputs, batch_targets)
+                test_loss += loss.item()
+        avg_test_loss = test_loss / len(test_dataloader)
+        print(f"Final Test Loss: {avg_test_loss:.4f}")
+    except FileNotFoundError:
+        print("No best model saved, skipping final test evaluation.")
+
+def train(num_games: int, silent: bool=False):
+    """
+    Train the NNUE network by playing games and collecting data.
+    """
+    all_positions, all_targets = collect_data(num_games, silent)
+    train_model(all_positions, all_targets, silent)
     
 
 
@@ -238,15 +309,20 @@ if __name__ == "__main__":
         net.random()
 
     while True:
+        all_positions = []
+        all_targets = []
         try:
-            train(EPOCHS, silent=args.silent)
+            all_positions, all_targets = collect_data(EPOCHS, silent=args.silent)
+            train_model(all_positions, all_targets, silent=args.silent)
         except (KeyboardInterrupt, Exception) as e:
-            print("Error! Saving net...")
+            print("Keyboard interrupt, training on collected data before exit...")
+            if all_positions and all_targets:
+                train_model(all_positions, all_targets, silent=args.silent)
+            print("Saving net...")
             net.save("chess_bot/nnue/nets/net.pt")
 
             if type(e) == KeyboardInterrupt:
                 raise e
-            raise e
         else:
             net.save("chess_bot/nnue/nets/net.pt")
             print("Model saved.")
