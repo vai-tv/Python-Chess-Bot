@@ -71,7 +71,6 @@ def main(num_positions: int):
 
         ax = axes[idx]
         ax.scatter(normalised_hc, nnue_scores, alpha=0.5)
-        ax.plot([min_hc, max_hc], [min_hc, max_hc], 'r--', label='y=x')
         ax.set_xlabel('Hardcode Evaluation')
         ax.set_ylabel('NNUE Prediction')
         ax.set_title(f'{net_file}')
@@ -83,7 +82,6 @@ def main(num_positions: int):
     for i, (net_file, nnue_scores) in enumerate(all_nnue_scores):
         color = colors[i % len(colors)]
         ax_combined.scatter(normalised_hc, nnue_scores, alpha=0.5, color=color, label=net_file)
-    ax_combined.plot([min_hc, max_hc], [min_hc, max_hc], 'k--', label='y=x')
     ax_combined.set_xlabel('Hardcode Evaluation')
     ax_combined.set_ylabel('NNUE Prediction')
     ax_combined.set_title('Combined All Nets')
