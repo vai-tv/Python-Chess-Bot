@@ -62,7 +62,7 @@ def main(num_positions: int):
                 board = boards[i]
 
                 # NNUE evaluation
-                nnue_score = net(C.board_to_feat_vector(board)).item()
+                nnue_score = net(net.board_to_feat_vector(board)).item()
                 nnue_raw = C.nnue_reverse_normalise_score(nnue_score)
                 nnue_normalised = C.normalise_score(nnue_raw)
                 nnue_scores.append(nnue_normalised)
