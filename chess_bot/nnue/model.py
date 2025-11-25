@@ -8,7 +8,7 @@ class Net(nn.Module):
     INPUT_FEATURES = 768 + 4 + 8 + 1  # Pieces + castling + en passant + side to move
     OUTPUT_FEATURES = 1
 
-    def __init__(self, hidden_sizes: list[int] = [128, 64, 32, 16], dropout_rate: float = 0.5):
+    def __init__(self, hidden_sizes: list[int] = [128, 64, 32, 16], dropout_rate: float = 0.05):
         super(Net, self).__init__()
 
         self.linears = nn.ModuleList()
@@ -25,7 +25,10 @@ class Net(nn.Module):
             in_feat = size
 
         # generate output layer
-        self.output_layer = nn.Linear(hidden_sizes[-1], 1)
+        self.output_layer = nn.Sequential(
+            nn.Linear(hidden_sizes[-1], 1),
+            nn.Tanh()
+        )
 
     def forward(self, x):
         for linear, norm, dropout, residual in zip(self.linears, self.norms, self.dropouts, self.residuals):
@@ -48,8 +51,7 @@ class Net(nn.Module):
             if piece:
                 piece_type = piece.piece_type  # 1-6
                 color = piece.color  # chess.WHITE or chess.BLACK
-                # Index calculation: (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
-                index = (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
+                index = (piece_type - 1) * 64 + square + (64 * 6 if color == chess.BLACK else 0)
                 feat_vector[index] = 1.0
         offset += 768
 
@@ -89,11 +91,13 @@ class Net(nn.Module):
                 torch.nn.init.xavier_uniform_(residual.weight)  # type: ignore
                 torch.nn.init.zeros_(residual.bias)  # type: ignore
 
-        torch.nn.init.xavier_uniform_(self.output_layer.weight)
-        torch.nn.init.zeros_(self.output_layer.bias)
+        # Initialize output_layer weights and bias correctly
+        torch.nn.init.xavier_uniform_(self.output_layer[0].weight)  # type: ignore
+        torch.nn.init.zeros_(self.output_layer[0].bias)  # type: ignore
 
 if __name__ == '__main__':
     net = Net()
     net.eval()
     net.random()
-    net.forward(net.board_to_feat_vector(chess.Board()))
+    # unsqueeze the input to add batch dimension as expected by nn.Linear
+    net.forward(net.board_to_feat_vector(chess.Board()).unsqueeze(0))
