@@ -67,7 +67,7 @@ def XY_pair() -> tuple[torch.Tensor, torch.Tensor]:
     board = random_board()
 
     # evaluate the board
-    value = C.nnue_normalise_score(evaluate(board))
+    value = np.tanh(C.nnue_normalise_score(evaluate(board)))
 
     # convert the board to a feature vector
     feat_vector = net.board_to_feat_vector(board)
@@ -126,7 +126,7 @@ def sample(n: int):
         feat_vector = net.board_to_feat_vector(board)
 
         # return the feature vector and the value
-        output = net(feat_vector).item()
+        output = np.arctanh(net(feat_vector).item())
         print(f"""T {value:.2f} | E {output:.2f} | e {round(output - value, 2)}""")
         # print(board)
 
