@@ -452,6 +452,7 @@ class Computer:
 
     MAX_QUIESCENCE_DEPTH = 4
     MAX_QUIESCENCE_MOVES = 8
+    QUIESCENCE_ACTIVATION_DEPTH = 1 # Start quiescence search at this depth
     MIN_PRUNE_SEARCH_DEPTH = 3 # SEARCH depth at which we start pruning the search tree
     # In other words, the tree is fully seearched x ply deep; higher values improve accuracy but seriously hurt performance
 
@@ -506,9 +507,10 @@ class Computer:
 
         # Quiescence search at leaf nodes
         if depth == 0:
-            quiescence_score = self.quiescence_search(board, alpha, beta, 0)
-            return quiescence_score, current_path
-            # return self.evaluate(board), current_path
+            if original_depth >= self.QUIESCENCE_ACTIVATION_DEPTH:
+                quiescence_score = self.quiescence_search(board, alpha, beta, 0)
+                return quiescence_score, current_path
+            return self.evaluate(board), current_path
 
         is_maximizing = board.turn == chess.WHITE
         best_score = float('-inf') if is_maximizing else float('inf')
@@ -722,19 +724,6 @@ class Computer:
 
         return best_score
 
-    @staticmethod
-    def board_to_feat_vector(board: chess.Board) -> torch.Tensor:
-        feat_vector = np.zeros(781, dtype=np.float32)
-        for square in range(64):
-            piece = board.piece_at(square)
-            if piece:
-                piece_type = piece.piece_type  # 1-6
-                color = piece.color  # chess.WHITE or chess.BLACK
-                # Index calculation: (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
-                index = (piece_type - 1) * 128 + (1 if color == chess.BLACK else 0) * 64 + square
-                feat_vector[index] = 1.0
-        return torch.tensor(feat_vector, dtype=torch.float32)
-
     def evaluate(self, board: chess.Board) -> float:
         """
         Evaluate a given board using the neural network.
@@ -744,8 +733,8 @@ class Computer:
             return self.hardcode_evaluate(board)
 
         with torch.no_grad():
-            score = NNUE(self.board_to_feat_vector(board)).item()
-            return self.nnue_reverse_normalise_score(score)
+            score = NNUE(NNUE.board_to_feat_vector(board)).item()
+            return self.nnue_reverse_normalise_score(np.arctanh(score))
 
     def nnue_normalise_score(self, x: float) -> float:
         """Normalise a given evaluation score such that it is appropriate for the NNUE."""
