@@ -19,7 +19,7 @@ from bot.main import Computer
 ####################################################################################################
 # TRAINING DATA AND CONSTANTS
 
-LEARNING_RATE = 5e-3
+LEARNING_RATE = 5e-5
 EPOCHS = int(1e3)
 BATCH_SIZE = 128
 
@@ -35,7 +35,7 @@ from nnue.model import Net
 
 net = Net()
 net_path = "chess_bot/nnue/nets/bootstrap.pt"
-criterion = nn.SmoothL1Loss()
+criterion = nn.MSELoss()
 
 try:
     net.load(net_path)
@@ -43,15 +43,16 @@ except FileNotFoundError:
     print("Could not find net, using random weights")
     net.random()
 optimiser = optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
-scheduler = lr_scheduler.ReduceLROnPlateau(optimiser, mode='min', factor=0.8, patience=100)
+scheduler = lr_scheduler.ReduceLROnPlateau(optimiser, mode='min', factor=0.8, patience=50)
 
+net.train()
 
 ####################################################################################################
 # TRAINING
 
 def random_board() -> chess.Board:
     board = chess.Board()
-    for i in range(0, np.random.poisson(25, size=2)[0]):
+    for i in range(0, np.random.poisson(100, size=2)[0]):
         legal_moves = list(board.legal_moves)
         if not legal_moves:
             break
