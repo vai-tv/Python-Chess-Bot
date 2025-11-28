@@ -203,3 +203,4 @@ cython_debug/
 
 # NNUE
 *.pt
+*.npz
