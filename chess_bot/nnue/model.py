@@ -8,7 +8,7 @@ class Net(nn.Module):
     INPUT_FEATURES = 768 + 4 + 8 + 1  # Pieces + castling + en passant + side to move
     OUTPUT_FEATURES = 1
 
-    def __init__(self, hidden_sizes: list[int] = [128, 64, 32, 16], dropout_rate: float = 0.05):
+    def __init__(self, hidden_sizes: list[int] = [128, 64, 32, 16], dropout_rate: float = 0.1):
         super(Net, self).__init__()
 
         self.linears = nn.ModuleList()
