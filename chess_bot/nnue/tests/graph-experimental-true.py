@@ -5,20 +5,34 @@ import random as rnd
 import torch
 import os
 
+from numpy import arctanh
+
 import sys
 sys.path.insert(0, 'chess_bot')
 
 from nnue.model import Net
 from bot.main import Computer
 
+MIN_HC = -10
+MAX_HC = 10
+
 
 def uniform_random_board():
-    board = chess.Board()
-    for _ in range(rnd.randint(100, 300)):
-        legals = list(board.legal_moves)
-        if not legals:
+    C = Computer(chess.WHITE)
+
+    while True:
+        board = chess.Board()
+        for _ in range(rnd.randint(0, 150)):
+            legals = list(board.legal_moves)
+            if not legals:
+                break
+            board.push(rnd.choice(legals))
+
+        score = C.hardcode_evaluate(board)
+        normalised_score = C.normalise_score(score)
+        if MIN_HC < normalised_score < MAX_HC:
             break
-        board.push(rnd.choice(legals))
+
     return board
 
 
@@ -39,8 +53,6 @@ def main(num_positions: int):
     boards = [uniform_random_board() for _ in range(num_positions)]
     hardcode_scores = [C.hardcode_evaluate(board) for board in boards]
     normalised_hc = [C.normalise_score(score) for score in hardcode_scores]
-    min_hc = min(normalised_hc)
-    max_hc = max(normalised_hc)
 
     all_nnue_scores = []
 
@@ -62,9 +74,10 @@ def main(num_positions: int):
                 board = boards[i]
 
                 # NNUE evaluation
-                nnue_score = net(net.board_to_feat_vector(board)).item()
-                nnue_raw = C.nnue_reverse_normalise_score(nnue_score)
-                nnue_normalised = C.normalise_score(nnue_raw)
+                nnue_raw = net(net.board_to_feat_vector(board)).item()
+                nnue_unbounded = arctanh(nnue_raw)
+                nnue_exact = C.nnue_reverse_normalise_score(nnue_unbounded)
+                nnue_normalised = C.normalise_score(nnue_exact)
                 nnue_scores.append(nnue_normalised)
 
         all_nnue_scores.append((net_file, nnue_scores))
