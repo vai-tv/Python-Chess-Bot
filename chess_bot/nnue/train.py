@@ -6,6 +6,13 @@ import chess
 import json
 import multiprocessing
 import numpy as np
+import uuid
+import time
+from pathlib import Path
+import random
+import uuid
+import time
+from pathlib import Path
 import os
 
 import torch
@@ -24,7 +31,9 @@ from bot.main import Computer
 LEARNING_RATE = 1e-4  # Increased learning rate for faster convergence
 EPOCHS = 25
 BATCH_SIZE = 128
+
 GAMMA = 0.95
+HEVAL_WEIGHT = 0.95 # 0-1 weight for hardcoded evaluation in target calculation
 
 C = Computer(chess.WHITE)
 nnue_evaluate = C.evaluate
@@ -43,7 +52,72 @@ net = Net()
 # Changed loss: combined MSELoss and SmoothL1Loss
 mse_criterion = nn.MSELoss()
 smoothl1_criterion = nn.SmoothL1Loss()
-optimiser = optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=5e-4)
+optimiser = optim.AdamW(net.parameters(), lr=LEARNING_RATE, weight_decay=1e-3)
+
+####################################################################################################
+# RECYCLED GAMES HANDLING
+
+GAME_RECYCLE_CHANCE = 0.4  # Chance of saving a game for recycling
+RECYCLED_GAME_PROPORTION = 0.3  # Proportion of recycled games against new games in each epoch
+
+RECYCLED_GAMES_DIR = Path("chess_bot/nnue/recycled_games")
+RECYCLED_GAMES_DIR.mkdir(parents=True, exist_ok=True)
+MAX_RECYCLED_GAMES = 1000  # Max number of recycled game files before pruning
+
+def _prune_recycled_games():
+    """Keep the number of saved recycled games under MAX_RECYCLED_GAMES
+    by removing the oldest files."""
+    files = sorted(RECYCLED_GAMES_DIR.glob("*.npz"), key=lambda p: p.stat().st_mtime)
+    if len(files) > MAX_RECYCLED_GAMES:
+        to_remove = files[:len(files) - MAX_RECYCLED_GAMES]
+        for p in to_remove:
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+def save_recycled_game(positions: list[torch.Tensor], targets: list[float]):
+    """Save an augmented game (positions and targets) to disk for later recycling.
+
+    Positions will be stored as a float32 ndarray of shape (n_positions, feat_len),
+    and targets stored as a float32 ndarray of shape (n_positions,).
+    """
+    if not positions:
+        return
+    rnd = uuid.uuid4().hex
+    ts = int(time.time() * 1e6)
+    fname = RECYCLED_GAMES_DIR / f"game_{ts}_{rnd}.npz"
+    # Convert positions to np arrays
+    try:
+        pos_arr = np.stack([p.detach().cpu().numpy() for p in positions])
+        targ_arr = np.array(targets, dtype=np.float32)
+        np.savez_compressed(fname, positions=pos_arr, targets=targ_arr)
+    except Exception as e:
+        print(f"Failed to save recycled game: {e}")
+    _prune_recycled_games()
+
+def load_recycled_games(n: int) -> tuple[list[torch.Tensor], list[float]]:
+    """Load up to `n` recycled games from disk and return combined positions and targets.
+    Each game previously saved is considered a single file and will be loaded completely.
+    """
+    positions = []
+    targets = []
+    files = list(RECYCLED_GAMES_DIR.glob("*.npz"))
+    if not files or n <= 0:
+        return positions, targets
+    files_chosen = random.sample(files, k=min(n, len(files)))
+    for p in files_chosen:
+        try:
+            with np.load(p, allow_pickle=True) as arr:
+                pos_arr = arr["positions"]
+                targ_arr = arr["targets"]
+                for row in pos_arr:
+                    positions.append(torch.tensor(row, dtype=torch.float32))
+                for t in targ_arr:
+                    targets.append(float(t))
+        except Exception as e:
+            print(f"Failed to load recycled game {p}: {e}")
+    return positions, targets
 
 ####################################################################################################
 # TRAINING
@@ -117,18 +191,20 @@ def play_game(silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
         # Get the current player
         current_computer = white_computer if board.turn == chess.WHITE else black_computer
 
-        # Evaluate the current position with hardcode evaluation
-        eval_score = hardcode_evaluate(board)
+        # Evaluate the current position
+        nn_score = nnue_evaluate(board)
+        hc_score = np.tanh(C.nnue_normalise_score(hardcode_evaluate(board)))
+        eval_score = HEVAL_WEIGHT * hc_score + (1 - HEVAL_WEIGHT) * nn_score
         feat_vector = net.board_to_feat_vector(board)
         positions.append(feat_vector)
         evaluations.append(np.tanh(C.nnue_normalise_score(eval_score)))
 
         # Variable move time
         ply = board.ply()
-        if ply < 20:
-            time_per_move = 5
+        if ply < 50:
+            time_per_move = 5.0
         else:
-            time_per_move = 7.5
+            time_per_move = 10
 
         if silent:
             sys.stdout = open(os.devnull, 'w')
@@ -168,17 +244,24 @@ def play_game(silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
         next_target = target
 
     # Augment data
-    # augmented_positions = []
-    # augmented_targets = []
-    # for pos, targ in zip(positions, targets):
-    #     augmented = augment_feat_vector(pos, targ)
-    #     for aug_pos, aug_targ in augmented:
-    #         augmented_positions.append(aug_pos)
-    #         augmented_targets.append(aug_targ)
+    augmented_positions = []
+    augmented_targets = []
+    for pos, targ in zip(positions, targets):
+        augmented = augment_feat_vector(pos, targ)
+        for aug_pos, aug_targ in augmented:
+            augmented_positions.append(aug_pos)
+            augmented_targets.append(aug_targ)
 
-    # return augmented_positions, augmented_targets
+    # Possibly save the augmented game for recycling
+    if np.random.rand() < GAME_RECYCLE_CHANCE:
+        try:
+            save_recycled_game(augmented_positions, augmented_targets)
+        except Exception as e:
+            print(f"Unable to save recycled game: {e}")
 
-    return positions, targets #type: ignore
+    return augmented_positions, augmented_targets
+
+    # return positions, targets #type: ignore
 
 def collect_data(n: int, silent: bool = False) -> tuple[list[torch.Tensor], list[float]]:
     """
@@ -189,9 +272,24 @@ def collect_data(n: int, silent: bool = False) -> tuple[list[torch.Tensor], list
     if silent:
         sys.stdout = open(os.devnull, 'w')
 
+    # Determine how many recycled games to load this epoch
+    num_recycled = int(n * RECYCLED_GAME_PROPORTION)
+    num_new = n - num_recycled
+
+    recycled_positions = []
+    recycled_targets = []
+    if num_recycled > 0:
+        rpos, rtarg = load_recycled_games(num_recycled)
+        recycled_positions.extend(rpos)
+        recycled_targets.extend(rtarg)
+
     try:
-        with multiprocessing.Pool(processes=workers) as pool:
-            results = list(tqdm(pool.imap(play_game, [silent] * n), total=n))
+        # Use a pool only if we need to generate new games
+        if num_new > 0:
+            with multiprocessing.Pool(processes=workers) as pool:
+                results = list(tqdm(pool.imap(play_game, [silent] * num_new), total=num_new))
+        else:
+            results = []
     except Exception as e:
         print(f"Error collecting data. {e}")
         return [], []
@@ -199,8 +297,8 @@ def collect_data(n: int, silent: bool = False) -> tuple[list[torch.Tensor], list
     if silent:
         sys.stdout = sys.__stdout__
 
-    all_positions = []
-    all_targets = []
+    all_positions = recycled_positions.copy()
+    all_targets = recycled_targets.copy()
     for positions, targets in results:
         all_positions.extend(positions)
         all_targets.extend(targets)
@@ -271,7 +369,7 @@ def train_model(all_positions: list[torch.Tensor], all_targets: list[float], sil
             avg_val_loss = epoch_val_loss / len(val_dataloader)
         else:
             avg_val_loss = float('inf')
-        scheduler.step(epoch)
+        scheduler.step(avg_val_loss)
         print(f"Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
         # Early stopping

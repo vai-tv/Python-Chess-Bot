@@ -31,7 +31,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from nnue.model import Net
 
 NNUE_PATH = os.path.join(os.path.dirname(__file__), '../nnue/nets/')
+
+# GPU support
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 NNUE = Net()
+NNUE = NNUE.to(device)
 
 hardcode = False
 if os.path.exists(NNUE_PATH + "best_net.pt"):
@@ -73,6 +77,10 @@ class Computer:
         self.beta_cuts = 0
         self.prunes = 0
         self.cache_hits = 0
+        # Batch evaluation metrics
+        self.batch_eval_calls = 0
+        self.batch_eval_total_items = 0
+        self.batch_eval_total_effective_items = 0
 
         # Evaluation caches - use shared caches if provided, otherwise create local ones
         self.transposition_table: dict[Hashable, float] = shared_transposition_table if shared_transposition_table is not None else {}
@@ -80,6 +88,8 @@ class Computer:
         
         # History heuristic table
         self.history_table: dict[chess.Move, int] = {}
+        # Max number of positions to batch at once for the NNUE forward pass
+        self.BATCH_EVAL_MAX = 128
 
     ##################################################
     #            OPENING BOOKS AND syzygy            #
@@ -567,7 +577,75 @@ class Computer:
         # Combine moves: captures first, then killer moves, then quiet moves
         ordered_moves = capture_moves + killer_moves_in_legals + quiet_moves
 
+        # Gather leaf moves to batch-evaluate. We conservatively batch only depth==1 moves
+        # that are not extensions and do not require quiescence.
+        leaf_batch_boards: list[chess.Board] = []
+        leaf_batch_moves: list[chess.Move] = []
+        for move in ordered_moves:
+            if depth != 1:
+                continue
+            # Pre-check extension conditions - same logic as used for extension below
+            extend = 0
+            if board.is_check():
+                extend = 1
+            elif last_captured_square is not None and board.is_capture(move) and move.to_square == last_captured_square:
+                extend = 1
+            elif move.promotion is not None:
+                extend = 1
+            # If an extension applies, we won't be a leaf; skip batching
+            if extend != 0:
+                continue
+            # Determine whether this child would use quiescence (original_depth applies to whole search)
+            if original_depth >= self.QUIESCENCE_ACTIVATION_DEPTH:
+                # Leaves will invoke quiescence; avoid batching that
+                continue
+            # Create child board and check terminal conditions first
+            b2 = board.copy()
+            b2.push(move)
+            if b2.is_checkmate() or b2.is_stalemate() or b2.is_insufficient_material() or b2.can_claim_fifty_moves() or b2.is_repetition(count=2):
+                # Terminal positions are handled in the main loop; don't add to batch
+                continue
+            # Candidate for batch evaluation
+            leaf_batch_boards.append(b2)
+            leaf_batch_moves.append(move)
+
+        # Optionally, get static NNUE scores for ordered moves to further improve move ordering.
+        move_static_scores: dict[chess.Move, float] = {}
+        try:
+            if ordered_moves and (self.start_time is None or self.timeout is None or self.timeout == float('inf') or time.time() - self.start_time < self.timeout * 0.9):
+                boards_for_order = [board.copy() for _ in ordered_moves]
+                for i, m in enumerate(ordered_moves):
+                    boards_for_order[i].push(m)
+                # Evaluate in chunks
+                for i in range(0, len(boards_for_order), self.BATCH_EVAL_MAX):
+                    chunk_boards = boards_for_order[i:i + self.BATCH_EVAL_MAX]
+                    chunk_moves = ordered_moves[i:i + self.BATCH_EVAL_MAX]
+                    try:
+                        chunk_scores = self.evaluate_batch(chunk_boards)
+                    except Exception:
+                        chunk_scores = [self.evaluate(b) for b in chunk_boards]
+                    for m, s in zip(chunk_moves, chunk_scores):
+                        move_static_scores[m] = s
+                # Reorder moves by static scores, merges with previously ordered list
+                if move_static_scores:
+                    ordered_moves.sort(key=lambda mv: move_static_scores.get(mv, 0.0), reverse=is_maximizing)
+        except Exception:
+            # Don't let static scoring break the search
+            move_static_scores = {}
+
         searched_moves = 0
+        # Pre-evaluate batched boards
+        batched_leaf_scores: dict[chess.Move, float] = {}
+        if leaf_batch_boards:
+            for i in range(0, len(leaf_batch_boards), self.BATCH_EVAL_MAX):
+                chunk_boards = leaf_batch_boards[i:i + self.BATCH_EVAL_MAX]
+                chunk_moves = leaf_batch_moves[i:i + self.BATCH_EVAL_MAX]
+                try:
+                    chunk_scores = self.evaluate_batch(chunk_boards)
+                except Exception:
+                    chunk_scores = [self.evaluate(b) for b in chunk_boards]
+                for m, s in zip(chunk_moves, chunk_scores):
+                    batched_leaf_scores[m] = s
         for move in ordered_moves:
             searched_moves += 1
             
@@ -590,7 +668,7 @@ class Computer:
                 reduction = 1 + (searched_moves // 6)  # More reduction for later moves
                 reduction = min(reduction, depth - 1)  # Don't reduce below depth 1
 
-            # Adjust depth with extension
+            # Adjust depth with extension and reduction
             new_depth = depth - 1 - reduction + extend
 
             board.push(move)
@@ -603,9 +681,37 @@ class Computer:
             if board.is_capture(move):
                 new_last_captured_square = move.to_square
 
-            score, path = self.minimax(board, new_depth, alpha, beta, 
-                                    original_depth=original_depth, current_path=new_path,
-                                    last_captured_square=new_last_captured_square)
+            # If this branch is a terminal position we precomputed, use that
+            if board.is_checkmate():
+                # If checkmate, return mate score adjusted for distance
+                if board.turn == chess.WHITE:
+                    score = float('-inf') + (original_depth - new_depth)
+                else:
+                    score = float('inf') - (original_depth - new_depth)
+                path = new_path
+                self.leaf_nodes_explored += 1
+                self.nodes_explored += 1
+            elif board.is_stalemate() or board.is_insufficient_material() or board.can_claim_fifty_moves() or board.is_repetition(count=2):
+                score = 0
+                path = new_path
+                self.leaf_nodes_explored += 1
+                self.nodes_explored += 1
+            # Use batched static evaluation for leaves when possible
+            elif new_depth == 0 and move in batched_leaf_scores and original_depth < self.QUIESCENCE_ACTIVATION_DEPTH:
+                score = batched_leaf_scores[move]
+                path = new_path
+                self.leaf_nodes_explored += 1
+                self.nodes_explored += 1
+            elif new_depth == 0 and original_depth >= self.QUIESCENCE_ACTIVATION_DEPTH:
+                # Use quiescence for leaves when required
+                score = self.quiescence_search(board, alpha, beta, 0)
+                path = new_path
+                self.leaf_nodes_explored += 1
+                self.nodes_explored += 1
+            else:
+                score, path = self.minimax(board, new_depth, alpha, beta, 
+                                        original_depth=original_depth, current_path=new_path,
+                                        last_captured_square=new_last_captured_square)
             board.pop()
             
             # Ensure the path returned from recursive call includes the current move
@@ -733,8 +839,81 @@ class Computer:
             return self.hardcode_evaluate(board)
 
         with torch.no_grad():
-            score = NNUE(NNUE.board_to_feat_vector(board)).item()
+            feat = NNUE.board_to_feat_vector(board)
+            feat = feat.to(device)
+            # Ensure a batch dimension if necessary
+            if feat.dim() == 1:
+                feat = feat.unsqueeze(0)
+            score = NNUE(feat).item()
             return self.nnue_reverse_normalise_score(np.arctanh(score))
+
+    def evaluate_batch(self, boards: list[chess.Board]) -> list[float]:
+        """
+        Evaluate multiple boards at once using the NNUE model, batching the
+        forward pass to leverage GPU or vectorized CPU execution.
+
+        The function checks the local transposition cache and only evaluates
+        boards that are not already cached. This reduces duplicate work and
+        is particularly useful for move-ordering during the top-level search.
+
+        Returns a list of scores in the same order as `boards`.
+        """
+        # Track batch metrics: number of times we are asked to batch-evaluate
+        self.batch_eval_calls += 1
+        self.batch_eval_total_items += len(boards)
+
+        if not boards:
+            return []
+
+        # Build list of feature tensors for the boards that are *not* in cache
+        cached_scores: dict[int, float] = {}
+        feats = []
+        indices = []
+        for i, board in enumerate(boards):
+            try:
+                key = board._transposition_key()
+            except Exception:
+                key = None
+            if key is not None and key in self.transposition_table:
+                cached_scores[i] = self.transposition_table[key]
+            else:
+                feat = NNUE.board_to_feat_vector(board)
+                feats.append(feat)
+                indices.append(i)
+
+        # Count how many boards will actually require a forward pass (not in cache)
+        self.batch_eval_total_effective_items += len(feats)
+
+        results = [0.0] * len(boards)
+
+        # Fill cached values first
+        for i, val in cached_scores.items():
+            results[i] = val
+
+        if feats:
+            # Stack and evaluate batch on device
+            with torch.no_grad():
+                batch_tensor = torch.stack(feats).to(device)
+                out = NNUE(batch_tensor).cpu().numpy()
+
+            # Map evaluated results back to the result list, and cache them
+            for idx, val in zip(indices, out):
+                # val is in range (-1, 1) because of Tanh; reverse transform
+                score = self.nnue_reverse_normalise_score(np.arctanh(val))
+                results[idx] = score
+                try:
+                    key = boards[idx]._transposition_key()
+                except Exception:
+                    key = None
+                if key is not None:
+                    self.transposition_table[key] = score
+
+        # There should be no None left, but if there are, replace with 0
+        for i, r in enumerate(results):
+            if r is None:
+                results[i] = 0.0
+
+        return results
 
     def nnue_normalise_score(self, x: float) -> float:
         """Normalise a given evaluation score such that it is appropriate for the NNUE."""
@@ -1288,6 +1467,9 @@ class Computer:
             'beta_cuts': computer.beta_cuts,
             'prunes': computer.prunes,
             'cache_hits': computer.cache_hits,
+            'batch_eval_calls': computer.batch_eval_calls,
+            'batch_eval_total_items': computer.batch_eval_total_items,
+            'batch_eval_total_effective_items': computer.batch_eval_total_effective_items,
             'optimal_path': optimal_path
         })
 
@@ -1393,7 +1575,20 @@ class Computer:
         moves = list(board.legal_moves)  # Convert generator to list for membership checks
         best_move = chess.Move.null()
 
-        move_score_map: list[tuple[chess.Move, float]] = [(move, 0) for move in moves] # Initialize once before loop
+        # Pre-evaluate positions after each legal move using batched NNUE evaluation.
+        # This gives us a good static ordering to improve move ordering and futility pruning.
+        boards_after_moves = []
+        for move in moves:
+            b2 = board.copy()
+            b2.push(move)
+            boards_after_moves.append(b2)
+
+        try:
+            static_scores = self.evaluate_batch(boards_after_moves)
+        except Exception:
+            static_scores = [0.0 for _ in moves]
+
+        move_score_map: list[tuple[chess.Move, float]] = [(move, score) for move, score in zip(moves, static_scores)]
         optimal_path: list[chess.Move] = []
 
         # Sort by the MVV-LVA heuristic
@@ -1403,7 +1598,23 @@ class Computer:
 
             print(f"""\nDEPTH {depth}: """,end='\t')
 
+            # Re-evaluate boards after moves at the current depth with batched NNUE
+            # This improves move ordering for deeper search iterations without
+            # issuing many small forward passes.
             move_score_map.sort(key=lambda x: x[1], reverse=board.turn == chess.WHITE)
+            # Create board list for moves to re-evaluate the position after each move
+            boards_after_moves = []
+            current_moves = [move for move, _ in move_score_map]
+            for move in current_moves:
+                b2 = board.copy()
+                b2.push(move)
+                boards_after_moves.append(b2)
+            try:
+                new_scores = self.evaluate_batch(boards_after_moves)
+                move_score_map = [(m, s) for (m, _), s in zip(move_score_map, new_scores)]
+            except Exception:
+                # If batch evaluation fails for any reason, keep the previous scores
+                pass
             moves = [move for move, _ in move_score_map]
 
             # Gradually filter out based on the previous scores
@@ -1505,6 +1716,10 @@ class Computer:
                     self.beta_cuts += metrics['beta_cuts']
                     self.prunes += metrics['prunes']
                     self.cache_hits += metrics['cache_hits']
+                    # Aggregate batch metrics
+                    self.batch_eval_calls += metrics.get('batch_eval_calls', 0)
+                    self.batch_eval_total_items += metrics.get('batch_eval_total_items', 0)
+                    self.batch_eval_total_effective_items += metrics.get('batch_eval_total_effective_items', 0)
                     optimal_path: list[chess.Move] = metrics['optimal_path']
 
                     # Update current best if needed
@@ -1649,6 +1864,9 @@ class Computer:
         self.beta_cuts = 0
         self.prunes = 0
         self.cache_hits = 0
+        self.batch_eval_calls = 0
+        self.batch_eval_total_items = 0
+        self.batch_eval_total_effective_items = 0
 
     def display_metrics(self, optimal_path: list[str]) -> None:
         
@@ -1668,6 +1886,16 @@ class Computer:
         Optimal path: {optimal_path}
         
         """)
+
+        # Print batching statistics
+        if self.batch_eval_calls > 0:
+            avg_batch_size = self.batch_eval_total_items / self.batch_eval_calls
+            avg_effective_batch = self.batch_eval_total_effective_items / self.batch_eval_calls
+        else:
+            avg_batch_size = float('nan')
+            avg_effective_batch = float('nan')
+
+        print(f"Average NNUE batch size: {avg_batch_size:.2f} (requested), {avg_effective_batch:.2f} (evaluated) over {self.batch_eval_calls} calls")
 
     @staticmethod
     def estimate_pawn_value(depth: int) -> None:
@@ -1985,7 +2213,7 @@ class Computer:
         print("Generated.")
 
         print("Warming up the interpreter...")
-        for _ in range(int(3e4)):
+        for _ in range(int(1e4)):
             _ = 12345 ** 2345
         print("Interpreter warmed up.")
 
